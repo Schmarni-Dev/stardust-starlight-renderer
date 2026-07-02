@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use ash::vk;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, uvec2, vec3};
@@ -6,7 +6,7 @@ use stardust_vulkan::{
     Context,
     materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager},
     mesh_manager::{MeshManager, VertexData},
-    object_manager::{ObjectManager, RenderInvocationData},
+    object_manager::{Object, ObjectManager, RenderInvocationData},
     render::{RenderInstance, SubPass, Texture, ViewData},
     subpasses::simple_opaque::SimpleOpaque,
 };
@@ -121,15 +121,20 @@ async fn main() {
         )
         .await
         .unwrap();
-    let render_data = RenderInvocationData::new(&ctx, vec![obj_1, obj_2, obj_3]).unwrap();
+    let render_data =
+        RenderInvocationData::new(&ctx, vec![obj_1.clone(), obj_2.clone(), obj_3.clone()]).unwrap();
     let mut app = App {
         ctx,
         window_data: None,
-        pbr_mats,
-        object_manager,
-        mesh_manager,
+        _pbr_mats: pbr_mats,
+        _object_manager: object_manager,
+        _mesh_manager: mesh_manager,
         recreate_swapchain: None,
         render_data,
+        start_time: Instant::now(),
+        obj_1,
+        obj_2,
+        obj_3,
     };
     println!("running app");
     event_loop.run_app(&mut app).unwrap();
@@ -138,12 +143,16 @@ async fn main() {
 struct App {
     ctx: Context,
     window_data: Option<WindowData>,
-    pbr_mats: PbrMaterialManager,
-    object_manager: ObjectManager,
-    mesh_manager: Arc<MeshManager>,
+    _pbr_mats: PbrMaterialManager,
+    _object_manager: ObjectManager,
+    _mesh_manager: Arc<MeshManager>,
     recreate_swapchain: Option<UVec2>,
+    obj_1: Arc<Object<PbrMaterial>>,
+    obj_2: Arc<Object<PbrMaterial>>,
+    obj_3: Arc<Object<PbrMaterial>>,
 
     render_data: RenderInvocationData<PbrMaterial>,
+    start_time: Instant,
 }
 
 struct WindowData {
@@ -316,7 +325,23 @@ impl ApplicationHandler for App {
                 );
                 // let proj_mat = Mat4::perspective_rh(90f32.to_radians(), ratio, 0.0, 1000.0);
 
-                let camera_mat = proj_mat * Mat4::from_translation((Vec3::Z) * 0.0).inverse();
+                let camera_mat = proj_mat * Mat4::from_translation((Vec3::Z) * 0.2).inverse();
+                let t = self.start_time.elapsed().as_secs_f32().sin();
+                let t2 = (self.start_time.elapsed().as_secs_f32() + 0.25).sin();
+                let t3 = (self.start_time.elapsed().as_secs_f32() * 1.5 + 0.60).cos();
+                self.obj_1.update_global_transform(
+                    Mat4::from_translation(vec3(t3 * 0.1, (t2 * 0.15) + 0.1, (t * -0.25) + -0.25))
+                        * Mat4::from_scale(Vec3::splat(0.001)),
+                );
+                self.obj_2.update_global_transform(
+                    Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
+                        * Mat4::from_scale(Vec3::splat(t * 0.002)),
+                );
+                self.obj_3.update_global_transform(
+                    Mat4::from_translation(vec3(0.15, 0.15, -0.251))
+                        * Mat4::from_scale(Vec3::splat(0.001))
+                        * Mat4::from_rotation_y(self.start_time.elapsed().as_secs_f32()),
+                );
                 // let camera_mat = proj_mat;
                 window_data.render_instance.update_view(
                     0,

@@ -74,6 +74,12 @@ impl ObjectManager {
     }
 }
 
+impl<M: MaterialHandle> Object<M> {
+    pub fn update_global_transform(&self, global_transform: Mat4) {
+        *self.transform.write().unwrap() = global_transform;
+    }
+}
+
 // TODO: remove?
 pub struct RenderInvocationData<Material: MaterialHandle> {
     metadata: Subbuffer<[ObjectMetadata]>,

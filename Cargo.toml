@@ -16,11 +16,7 @@ vulkano = { version = "0.35.2", default-features = false, features = [
 	"document_unchecked",
 ] }
 vulkano-shaders = "0.35.0"
-winit = { version = "0.30.13", default-features = false, features = [
-	"wayland",
-	"mint",
-	"rwh_06",
-] }
+winit = { version = "0.30.13", default-features = false, features = ["wayland", "mint", "rwh_06", "x11"] }
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["full"] }
