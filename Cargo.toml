@@ -1,0 +1,26 @@
+[package]
+name = "stardust-vulkan"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = "0.38.0"
+glam = { version = "0.33.2", features = ["bytemuck", "mint"] }
+offset-allocator = "0.2.0"
+rustix = { version = "1.1.4", features = ["fs"] }
+timeline_syncobj = "0.2.0"
+tokio = { version = "1.52.3", features = ["rt", "sync", "rt-multi-thread"] }
+tracing = "0.1.44"
+vulkano = { version = "0.35.2", default-features = false, features = [
+	"macros",
+	"document_unchecked",
+] }
+vulkano-shaders = "0.35.0"
+winit = { version = "0.30.13", default-features = false, features = [
+	"wayland",
+	"mint",
+	"rwh_06",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["full"] }
