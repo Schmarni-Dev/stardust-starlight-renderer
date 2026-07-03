@@ -24,6 +24,7 @@ pub mod render;
 pub mod resource_manager;
 pub mod subpasses;
 pub mod vulkano_exts;
+pub mod images;
 
 pub struct Context {
     pub instance: Arc<Instance>,

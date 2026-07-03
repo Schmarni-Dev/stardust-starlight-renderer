@@ -32,7 +32,7 @@ use vulkano::{
     },
 };
 
-use crate::{Context, render::RenderContext, vulkano_exts::RecordingCommandBufferExt};
+use crate::{Context, render::RenderContext};
 #[derive(Debug, BufferContents, Vertex, Clone, Copy)]
 #[repr(C)]
 struct SimpleVertex {
@@ -57,15 +57,13 @@ impl FullscreenResolve {
                     PipelineBindPoint::Graphics,
                     &self.pipeline_layout,
                     0,
-                    &[
-                        WriteDescriptorSet::image_view_with_layout(
-                            0,
-                            DescriptorImageViewInfo {
-                                image_view: ctx.opaque_view.clone(),
-                                image_layout: ImageLayout::General,
-                            },
-                        ),
-                    ],
+                    &[WriteDescriptorSet::image_view_with_layout(
+                        0,
+                        DescriptorImageViewInfo {
+                            image_view: ctx.opaque.image_view(),
+                            image_layout: ImageLayout::General,
+                        },
+                    )],
                 )
                 .unwrap()
                 // .set_input_attachment_indecies(&[0, u32::MAX, u32::MAX, u32::MAX], Some(1), None)

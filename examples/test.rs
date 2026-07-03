@@ -18,7 +18,7 @@ use vulkano::{
     },
     device::{DeviceExtensions, DeviceFeatures, DeviceOwnedVulkanObject},
     format::Format,
-    image::{Image, ImageLayout, ImageUsage},
+    image::{Image, ImageLayout, ImageUsage, SampleCount},
     swapchain::{
         AcquireNextImageInfo, AcquiredImage, CompositeAlpha, PresentInfo, SemaphorePresentInfo,
         Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
@@ -211,6 +211,8 @@ impl ApplicationHandler for App {
             }],
             image_format,
             Format::D32_SFLOAT,
+            // not sure if msaa works yet
+            SampleCount::Sample1,
         );
 
         self.window_data = Some(WindowData {
@@ -275,6 +277,8 @@ impl ApplicationHandler for App {
                         }],
                         swap.image_format(),
                         Format::D32_SFLOAT,
+                        // not sure if msaa works yet
+                        SampleCount::Sample1,
                     );
                     window_data.swapchain = swap;
                     window_data.swap_images = images;
@@ -360,13 +364,10 @@ impl ApplicationHandler for App {
                 )
                 .unwrap();
                 let (mut cmds, handles) = window_data.render_instance.render(
-                    &self.ctx,
                     Texture::Image(target_image.clone()),
                     |ctx, mut cmds| {
-                        window_data
-                            .opaque
-                            .record(&self.render_data, &ctx, &mut cmds);
-                        (ctx, cmds)
+                        window_data.opaque.record(&self.render_data, ctx, &mut cmds);
+                        cmds
                     },
                     cmds,
                 );

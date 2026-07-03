@@ -8,7 +8,6 @@ use vulkano::{
     command_buffer::{
         RecordingCommandBuffer, RenderingAttachmentInfo, RenderingInfo, SubpassContents,
     },
-    device::DeviceOwnedVulkanObject,
     format::{ClearValue, Format},
     image::{
         Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, SampleCount,
@@ -21,8 +20,8 @@ use vulkano::{
 };
 
 use crate::{
-    Context, materials::MaterialHandle, object_manager::RenderInvocationData,
-    subpasses::fullscreen_resolve::FullscreenResolve,
+    Context, images::transient_image::TransientAttachment, materials::MaterialHandle,
+    object_manager::RenderInvocationData, subpasses::fullscreen_resolve::FullscreenResolve,
 };
 
 pub trait SubPass<Material: MaterialHandle> {
@@ -34,15 +33,11 @@ pub trait SubPass<Material: MaterialHandle> {
     );
 }
 pub struct RenderContext {
-    pub opaque: Arc<Image>,
-    pub depth: Arc<Image>,
-    pub wboit: Arc<Image>,
-    pub wboit_revealage: Arc<Image>,
+    pub opaque: TransientAttachment,
+    pub depth: TransientAttachment,
+    pub wboit: TransientAttachment,
+    pub wboit_revealage: TransientAttachment,
     pub previous_wboit_revealage: Arc<Image>,
-    pub opaque_view: Arc<ImageView>,
-    pub depth_view: Arc<ImageView>,
-    pub wboit_view: Arc<ImageView>,
-    pub wboit_revealage_view: Arc<ImageView>,
     // pub previous_wboit_revealage: Arc<Image>,
     pub views_bda: DeviceAddress,
 }
@@ -58,6 +53,7 @@ pub struct RenderInstance {
     views: Subbuffer<[ViewData]>,
     depth_format: Format,
     fullscreen_pass: FullscreenResolve,
+    render_ctx: RenderContext,
 }
 
 pub enum Texture {
@@ -72,10 +68,12 @@ impl RenderInstance {
         views: &[ViewData],
         color_format: Format,
         depth_format: Format,
+        msaa: SampleCount,
     ) -> Self {
+        let resolution = resolution.extend(views.len() as u32);
         // TODO: msaa, needs custom_resolve i think, which needs custom bindings because even ash
         // doesn't have it yet (in release at least)
-        let samples = SampleCount::Sample1;
+        let samples = msaa;
         let views_buffer = Buffer::new_slice(
             ctx.alloc.clone(),
             BufferCreateInfo {
@@ -91,96 +89,30 @@ impl RenderInstance {
         )
         .unwrap();
         views_buffer.write().unwrap().copy_from_slice(views);
-        Self {
-            resolution: resolution.extend(views.len() as u32),
-            previous_wboit_revealage: Image::new(
-                ctx.alloc.clone(),
-                ImageCreateInfo {
-                    image_type: ImageType::Dim2d,
-                    format: Format::R8_UNORM,
-                    extent: [resolution.x, resolution.y, 1],
-                    array_layers: views_buffer.len() as u32,
-                    samples,
-                    usage: ImageUsage::TRANSIENT_ATTACHMENT
-                        | ImageUsage::COLOR_ATTACHMENT
-                        | ImageUsage::INPUT_ATTACHMENT,
-                    ..Default::default()
-                },
-                Default::default(),
-            )
-            .unwrap(),
-            views: views_buffer,
-            depth_format,
-            fullscreen_pass: FullscreenResolve::new(ctx, color_format),
-        }
-    }
-    pub fn update_view(&self, view_index: usize, data: ViewData) {
-        self.views.write().unwrap()[view_index] = data;
-    }
-    pub fn render(
-        &mut self,
-        ctx: &Context,
-        color_target: Texture,
-        render_callback: impl FnMut(
-            RenderContext,
-            RecordingCommandBuffer,
-        ) -> (RenderContext, RecordingCommandBuffer),
-        cmds: RecordingCommandBuffer,
-    ) -> (RecordingCommandBuffer, Box<dyn Any>) {
-        // self.render_inner(ctx, color_target, render_callback, cmds)
-        if let Ok(rt) = tokio::runtime::Handle::try_current()
-            && rt.runtime_flavor() == RuntimeFlavor::CurrentThread
-        {
-            self.render_inner(ctx, color_target, render_callback, cmds)
-        } else {
-            tokio::task::block_in_place(|| {
-                self.render_inner(ctx, color_target, render_callback, cmds)
-            })
-        }
-    }
-    fn render_inner(
-        &mut self,
-        ctx: &Context,
-        color_target: Texture,
-        mut render_callback: impl FnMut(
-            RenderContext,
-            RecordingCommandBuffer,
-        ) -> (RenderContext, RecordingCommandBuffer),
-        mut cmds: RecordingCommandBuffer,
-    ) -> (RecordingCommandBuffer, Box<dyn Any>) {
-        let color_target_image = match &color_target {
-            Texture::Image(image) => image,
-            Texture::Dmatex(image) => image,
-        };
-        let format = color_target_image.format();
-        // TODO: msaa, needs custom_resolve i think, which needs custom bindings because even ash
-        // doesn't have it yet (in release at least)
-        let samples = SampleCount::Sample1;
-        // TODO: keep these image handles around instead of recreating them
-        let opaque = Image::new(
-            ctx.alloc.clone(),
+
+        let opaque = TransientAttachment::new(
+            ctx,
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
-                format,
-                extent: [self.resolution.x, self.resolution.y, 1],
-                array_layers: self.resolution.z,
+                format: color_format,
+                extent: [resolution.x, resolution.y, 1],
+                array_layers: resolution.z,
                 samples,
                 usage: ImageUsage::TRANSIENT_ATTACHMENT
                     | ImageUsage::COLOR_ATTACHMENT
                     | ImageUsage::INPUT_ATTACHMENT,
                 ..Default::default()
             },
-            // does this work with transient? do i need to create a RawImage instead?
-            Default::default(),
+            "Transient Opaque Target",
         )
         .unwrap();
-        let depth = Image::new(
-            ctx.alloc.clone(),
+        let depth = TransientAttachment::new(
+            ctx,
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
-                format: self.depth_format,
-                extent: [self.resolution.x, self.resolution.y, 1],
-                array_layers: self.resolution.z,
+                format: depth_format,
+                extent: [resolution.x, resolution.y, 1],
+                array_layers: resolution.z,
                 samples,
                 // TODO: add support for resolving the depth buffer to vram
                 usage: ImageUsage::TRANSIENT_ATTACHMENT
@@ -188,137 +120,138 @@ impl RenderInstance {
                     | ImageUsage::INPUT_ATTACHMENT,
                 ..Default::default()
             },
-            // does this work with transient? do i need to create a RawImage instead?
-            Default::default(),
+            "Transient Depth Target",
         )
         .unwrap();
-        let wboit = Image::new(
-            ctx.alloc.clone(),
+        let wboit = TransientAttachment::new(
+            ctx,
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
                 format: Format::R16G16B16A16_SFLOAT,
-                extent: [self.resolution.x, self.resolution.y, 1],
-                array_layers: self.resolution.z,
+                extent: [resolution.x, resolution.y, 1],
+                array_layers: resolution.z,
                 samples,
                 usage: ImageUsage::TRANSIENT_ATTACHMENT
                     | ImageUsage::COLOR_ATTACHMENT
                     | ImageUsage::INPUT_ATTACHMENT,
                 ..Default::default()
             },
-            // does this work with transient? do i need to create a RawImage instead?
-            Default::default(),
+            "Transient WBOIT Target",
         )
         .unwrap();
-        let revealage = Image::new(
+        let revealage = TransientAttachment::new(
+            ctx,
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::R8_UNORM,
+                extent: [resolution.x, resolution.y, 1],
+                array_layers: resolution.z,
+                samples,
+                usage: ImageUsage::TRANSIENT_ATTACHMENT
+                    | ImageUsage::COLOR_ATTACHMENT
+                    | ImageUsage::INPUT_ATTACHMENT,
+                ..Default::default()
+            },
+            "Transient WBOIT Revealage Target",
+        )
+        .unwrap();
+        let previous_wboit_revealage = Image::new(
             ctx.alloc.clone(),
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
                 format: Format::R8_UNORM,
-                extent: [self.resolution.x, self.resolution.y, 1],
-                array_layers: self.resolution.z,
+                extent: [resolution.x, resolution.y, 1],
+                array_layers: views_buffer.len() as u32,
                 samples,
                 usage: ImageUsage::TRANSIENT_ATTACHMENT
                     | ImageUsage::COLOR_ATTACHMENT
                     | ImageUsage::INPUT_ATTACHMENT,
                 ..Default::default()
             },
-            // does this work with transient? do i need to create a RawImage instead?
             Default::default(),
         )
         .unwrap();
-        let opaque_view =
-            ImageView::new(opaque.clone(), ImageViewCreateInfo::from_image(&opaque)).unwrap();
-        let depth_view =
-            ImageView::new(depth.clone(), ImageViewCreateInfo::from_image(&depth)).unwrap();
-        let wboit_view =
-            ImageView::new(wboit.clone(), ImageViewCreateInfo::from_image(&wboit)).unwrap();
-        let revealage_view = ImageView::new(
-            revealage.clone(),
-            ImageViewCreateInfo::from_image(&revealage),
-        )
-        .unwrap();
+        let render_ctx = RenderContext {
+            opaque,
+            depth,
+            wboit,
+            wboit_revealage: revealage,
+            previous_wboit_revealage: previous_wboit_revealage.clone(),
+            views_bda: views_buffer.device_address().unwrap().get(),
+        };
+        Self {
+            resolution,
+            previous_wboit_revealage,
+            views: views_buffer,
+            depth_format,
+            fullscreen_pass: FullscreenResolve::new(ctx, color_format),
+            render_ctx,
+        }
+    }
+    pub fn update_view(&self, view_index: usize, data: ViewData) {
+        self.views.write().unwrap()[view_index] = data;
+    }
+    pub fn render(
+        &mut self,
+        color_target: Texture,
+        render_callback: impl FnMut(&RenderContext, RecordingCommandBuffer) -> RecordingCommandBuffer,
+        cmds: RecordingCommandBuffer,
+    ) -> (RecordingCommandBuffer, Box<dyn Any>) {
+        // self.render_inner(ctx, color_target, render_callback, cmds)
+        if let Ok(rt) = tokio::runtime::Handle::try_current()
+            && rt.runtime_flavor() == RuntimeFlavor::CurrentThread
+        {
+            self.render_inner(color_target, render_callback, cmds)
+        } else {
+            tokio::task::block_in_place(|| self.render_inner(color_target, render_callback, cmds))
+        }
+    }
+    fn render_inner(
+        &mut self,
+        color_target: Texture,
+        mut render_callback: impl FnMut(
+            &RenderContext,
+            RecordingCommandBuffer,
+        ) -> RecordingCommandBuffer,
+        mut cmds: RecordingCommandBuffer,
+    ) -> (RecordingCommandBuffer, Box<dyn Any>) {
+        let color_target_image = match &color_target {
+            Texture::Image(image) => image,
+            Texture::Dmatex(image) => image,
+        };
         let color_target_view = ImageView::new(
             color_target_image.clone(),
             ImageViewCreateInfo::from_image(&color_target_image),
         )
         .unwrap();
-        opaque
-            .set_debug_utils_object_name(Some("Transient Opaque Target"))
-            .unwrap();
-        depth
-            .set_debug_utils_object_name(Some("Transient Depth Target"))
-            .unwrap();
-        wboit
-            .set_debug_utils_object_name(Some("Transient WBOIT Target"))
-            .unwrap();
-        revealage
-            .set_debug_utils_object_name(Some("Transient WBOIT Revealage Target"))
-            .unwrap();
-        opaque_view
-            .set_debug_utils_object_name(Some("Transient Opaque Target View"))
-            .unwrap();
-        depth_view
-            .set_debug_utils_object_name(Some("Transient Depth Target View"))
-            .unwrap();
-        wboit_view
-            .set_debug_utils_object_name(Some("Transient WBOIT Target View"))
-            .unwrap();
-        revealage_view
-            .set_debug_utils_object_name(Some("Transient WBOIT Revealage Target View"))
-            .unwrap();
         unsafe {
+            let RenderContext {
+                opaque,
+                depth,
+                wboit,
+                wboit_revealage,
+                previous_wboit_revealage: _,
+                views_bda: _,
+            } = &self.render_ctx;
             cmds.pipeline_barrier(&DependencyInfo {
                 dependency_flags: DependencyFlags::BY_REGION,
                 image_memory_barriers: [
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::TOP_OF_PIPE,
-                        src_access: AccessFlags::empty(),
-                        dst_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        dst_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        // TODO: optimize?
-                        old_layout: ImageLayout::Undefined,
-                        // LocalRead would be ideal, but vulkano doesn't have a variant for that
-                        new_layout: ImageLayout::General,
-                        subresource_range: opaque.subresource_range(),
-                        ..ImageMemoryBarrier::image(opaque.clone())
-                    },
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::TOP_OF_PIPE,
-                        src_access: AccessFlags::empty(),
-                        dst_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        dst_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        // TODO: optimize?
-                        old_layout: ImageLayout::Undefined,
-                        // LocalRead would be ideal, but vulkano doesn't have a variant for that
-                        new_layout: ImageLayout::General,
-                        subresource_range: wboit.subresource_range(),
-                        ..ImageMemoryBarrier::image(wboit.clone())
-                    },
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::TOP_OF_PIPE,
-                        src_access: AccessFlags::empty(),
-                        dst_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        dst_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        // TODO: optimize?
-                        old_layout: ImageLayout::Undefined,
-                        // LocalRead would be ideal, but vulkano doesn't have a variant for that
-                        new_layout: ImageLayout::General,
-                        subresource_range: revealage.subresource_range(),
-                        ..ImageMemoryBarrier::image(revealage.clone())
-                    },
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::TOP_OF_PIPE,
-                        src_access: AccessFlags::empty(),
-                        dst_stages: PipelineStages::EARLY_FRAGMENT_TESTS
-                            | PipelineStages::LATE_FRAGMENT_TESTS,
-                        dst_access: AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        // TODO: optimize?
-                        old_layout: ImageLayout::Undefined,
-                        // LocalRead would be ideal, but vulkano doesn't have a variant for that
-                        new_layout: ImageLayout::General,
-                        subresource_range: depth.subresource_range(),
-                        ..ImageMemoryBarrier::image(depth.clone())
-                    },
+                    opaque.setup_barrier(
+                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                        AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    ),
+                    wboit.setup_barrier(
+                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                        AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    ),
+                    wboit_revealage.setup_barrier(
+                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                        AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    ),
+                    depth.setup_barrier(
+                        PipelineStages::EARLY_FRAGMENT_TESTS | PipelineStages::LATE_FRAGMENT_TESTS,
+                        AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    ),
                     ImageMemoryBarrier {
                         src_stages: PipelineStages::empty(),
                         src_access: AccessFlags::empty(),
@@ -345,15 +278,15 @@ impl RenderInstance {
                         load_op: AttachmentLoadOp::Clear,
                         clear_value: Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
                         image_layout: ImageLayout::General,
-                        ..RenderingAttachmentInfo::image_view(opaque_view.clone())
+                        ..RenderingAttachmentInfo::image_view(opaque.image_view())
                     }),
                     Some(RenderingAttachmentInfo {
                         image_layout: ImageLayout::General,
-                        ..RenderingAttachmentInfo::image_view(wboit_view.clone())
+                        ..RenderingAttachmentInfo::image_view(wboit.image_view())
                     }),
                     Some(RenderingAttachmentInfo {
                         image_layout: ImageLayout::General,
-                        ..RenderingAttachmentInfo::image_view(revealage_view.clone())
+                        ..RenderingAttachmentInfo::image_view(wboit_revealage.image_view())
                     }),
                     Some(RenderingAttachmentInfo {
                         image_layout: ImageLayout::ColorAttachmentOptimal,
@@ -364,7 +297,7 @@ impl RenderInstance {
                     load_op: AttachmentLoadOp::Clear,
                     clear_value: Some(ClearValue::Depth(0.0)),
                     image_layout: ImageLayout::General,
-                    ..RenderingAttachmentInfo::image_view(depth_view.clone())
+                    ..RenderingAttachmentInfo::image_view(depth.image_view())
                 }),
                 // TODO: stencil attachment
                 stencil_attachment: None,
@@ -385,53 +318,26 @@ impl RenderInstance {
             .set_scissor_with_count(&[Scissor::default()])
             .unwrap();
         }
-        let (render_ctx, mut cmds) = render_callback(
-            RenderContext {
-                opaque,
-                depth,
-                wboit,
-                wboit_revealage: revealage,
-                previous_wboit_revealage: self.previous_wboit_revealage.clone(),
-                views_bda: self.views.device_address().unwrap().get(),
-                opaque_view,
-                depth_view,
-                wboit_view,
-                wboit_revealage_view: revealage_view,
-            },
-            cmds,
-        );
+        let mut cmds = render_callback(&self.render_ctx, cmds);
         unsafe {
             cmds.pipeline_barrier(&DependencyInfo {
                 dependency_flags: DependencyFlags::BY_REGION,
                 image_memory_barriers: [
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        src_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        dst_stages: PipelineStages::FRAGMENT_SHADER,
-                        dst_access: AccessFlags::INPUT_ATTACHMENT_READ,
-                        // LocalRead would be ideal, but vulkano doesn't have a variant for that
-                        old_layout: ImageLayout::General,
-                        new_layout: ImageLayout::General,
-                        subresource_range: render_ctx.opaque.subresource_range(),
-                        ..ImageMemoryBarrier::image(render_ctx.opaque.clone())
-                    },
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::LATE_FRAGMENT_TESTS,
-                        src_access: AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        dst_stages: PipelineStages::FRAGMENT_SHADER,
-                        dst_access: AccessFlags::INPUT_ATTACHMENT_READ,
-                        old_layout: ImageLayout::General,
-                        new_layout: ImageLayout::General,
-                        subresource_range: render_ctx.depth.subresource_range(),
-                        ..ImageMemoryBarrier::image(render_ctx.depth.clone())
-                    },
+                    self.render_ctx.opaque.local_read_barrier(
+                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                        AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    ),
+                    self.render_ctx.depth.local_read_barrier(
+                        PipelineStages::LATE_FRAGMENT_TESTS,
+                        AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    ),
                 ]
                 .into_iter()
                 .collect(),
                 ..Default::default()
             })
             .unwrap();
-            self.fullscreen_pass.record(&render_ctx, &mut cmds);
+            self.fullscreen_pass.record(&self.render_ctx, &mut cmds);
             cmds.end_rendering().unwrap();
         }
         // unsafe {
@@ -449,6 +355,6 @@ impl RenderInstance {
         //     ))
         //     .unwrap();
         // }
-        (cmds, Box::new(render_ctx))
+        (cmds, Box::new(()))
     }
 }
