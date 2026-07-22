@@ -4,7 +4,7 @@ use vulkano::{
     Validated, VulkanError,
     device::DeviceOwnedVulkanObject,
     image::{
-        Image, ImageCreateInfo, ImageLayout, ImageMemory, ImageUsage,
+        Image, ImageCreateInfo, ImageLayout, ImageUsage,
         sys::RawImage,
         view::{ImageView, ImageViewCreateInfo},
     },

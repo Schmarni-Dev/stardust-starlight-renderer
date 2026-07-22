@@ -20,7 +20,7 @@ use vulkano::{
 };
 
 use crate::{
-    Context, images::transient_image::TransientAttachment, materials::MaterialHandle,
+    Context, images::transient_attachment::TransientAttachment, materials::MaterialHandle,
     object_manager::RenderInvocationData, subpasses::fullscreen_resolve::FullscreenResolve,
 };
 

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ash = "0.38.0"
+drm-fourcc = "2.2.0"
 glam = { version = "0.33.2", features = ["bytemuck", "mint"] }
 offset-allocator = "0.2.0"
 rustix = { version = "1.1.4", features = ["fs"] }
