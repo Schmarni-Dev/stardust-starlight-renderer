@@ -56,6 +56,11 @@ impl<T: BufferContents + Send> Drop for ResourceHandle<T> {
         });
     }
 }
+impl<T: BufferContents + Send> ResourceHandle<T> {
+    pub fn alloc_index(&self) -> u32 {
+        self.alloc.offset
+    }
+}
 
 impl<T: BufferContents + Send> ResourceManager<T> {
     pub fn new(buffer_size: u64) -> Arc<Self> {
@@ -63,6 +68,15 @@ impl<T: BufferContents + Send> ResourceManager<T> {
             buffer_size,
             buffers: Vec::new().into(),
             allocator: Allocator::new(u32::MAX - 8).into(),
+        }
+        .into()
+    }
+    /// max_items may at most be u32::MAX - 8
+    pub fn new_with_max(buffer_size: u64, max_items: u32) -> Arc<Self> {
+        Self {
+            buffer_size,
+            buffers: Vec::new().into(),
+            allocator: Allocator::new(max_items.min(u32::MAX - 8)).into(),
         }
         .into()
     }

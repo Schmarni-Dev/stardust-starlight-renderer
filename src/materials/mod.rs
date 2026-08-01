@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use vulkano::DeviceSize;
 
 pub mod simple_pbr;
+pub mod image_common;
 
 pub trait MaterialHandle: Debug + 'static {
     /// # Safety:

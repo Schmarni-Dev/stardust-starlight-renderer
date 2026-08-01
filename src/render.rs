@@ -20,7 +20,7 @@ use vulkano::{
 };
 
 use crate::{
-    Context, images::transient_attachment::TransientAttachment, materials::MaterialHandle,
+    Context, images::{ImageManager, transient_attachment::TransientAttachment}, materials::MaterialHandle,
     object_manager::RenderInvocationData, subpasses::fullscreen_resolve::FullscreenResolve,
 };
 
@@ -28,6 +28,7 @@ pub trait SubPass<Material: MaterialHandle> {
     fn record(
         &mut self,
         data: &RenderInvocationData<Material>,
+        images: &ImageManager,
         ctx: &RenderContext,
         cmd: &mut RecordingCommandBuffer,
     );

@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use vulkano::{
     Version, VulkanLibrary,
-    command_buffer::{
-        CommandBuffer, PrimaryCommandBufferAbstract,
-        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
+    command_buffer::allocator::{
+        StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
+    },
+    descriptor_set::allocator::{
+        StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo,
     },
     device::{
         Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateFlags,
@@ -12,10 +14,11 @@ use vulkano::{
         physical::{PhysicalDevice, PhysicalDeviceType},
     },
     instance::{Instance, InstanceCreateInfo, InstanceExtensions},
-    memory::allocator::{GenericMemoryAllocatorCreateInfo, StandardMemoryAllocator},
+    memory::allocator::StandardMemoryAllocator,
 };
 
 pub mod dmatex;
+pub mod images;
 pub mod materials;
 pub mod mesh_manager;
 pub mod object_manager;
@@ -24,7 +27,6 @@ pub mod render;
 pub mod resource_manager;
 pub mod subpasses;
 pub mod vulkano_exts;
-pub mod images;
 
 pub struct Context {
     pub instance: Arc<Instance>,
@@ -32,6 +34,7 @@ pub struct Context {
     pub device: Arc<Device>,
     pub alloc: Arc<StandardMemoryAllocator>,
     pub cmd_buf_alloc: Arc<StandardCommandBufferAllocator>,
+    pub descriptor_set_alloc: Arc<StandardDescriptorSetAllocator>,
     pub gfx_queue: Arc<Queue>,
 }
 impl Context {
@@ -99,6 +102,7 @@ impl Context {
             khr_external_semaphore: true,
             khr_external_semaphore_fd: true,
             khr_push_descriptor: true,
+            // ext_rgba10x6_formats: true,
             ..Default::default()
         } | additional_device_exts;
         let required_device_features = DeviceFeatures {
@@ -106,17 +110,24 @@ impl Context {
             multi_draw_indirect: true,
             draw_indirect_count: true,
             descriptor_indexing: true,
-            image_cube_array: true,
+            runtime_descriptor_array: true,
+            descriptor_binding_partially_bound: true,
+            descriptor_binding_sampled_image_update_after_bind: true,
+            shader_sampled_image_array_non_uniform_indexing: true,
             shader_input_attachment_array_dynamic_indexing: true,
             shader_input_attachment_array_non_uniform_indexing: true,
+            // TODO: this is needed for this format to be usable at all, as we do ycbcr in shader,
+            // technically optional, but modifies format support
+            // format_rgba10x6_without_y_cb_cr_sampler: true,
+            image_cube_array: true,
             // global_priority_query: true,
             dynamic_rendering: true,
             dynamic_rendering_local_read: true,
             synchronization2: true,
             buffer_device_address: true,
             multiview: true,
-            sampler_ycbcr_conversion: true,
-            ycbcr_image_arrays: true,
+            // sampler_ycbcr_conversion: true,
+            // ycbcr_image_arrays: true,
             scalar_block_layout: true,
             shader_int64: true,
             shader_int8: true,
@@ -171,6 +182,13 @@ impl Context {
             cmd_buf_alloc: Arc::new(StandardCommandBufferAllocator::new(
                 device.clone(),
                 StandardCommandBufferAllocatorCreateInfo::default(),
+            )),
+            descriptor_set_alloc: Arc::new(StandardDescriptorSetAllocator::new(
+                device.clone(),
+                StandardDescriptorSetAllocatorCreateInfo {
+                    update_after_bind: true,
+                    ..Default::default()
+                },
             )),
             instance,
             phys_dev,

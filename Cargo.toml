@@ -20,4 +20,5 @@ vulkano-shaders = "0.35.0"
 winit = { version = "0.30.13", default-features = false, features = ["wayland", "mint", "rwh_06", "x11"] }
 
 [dev-dependencies]
+rand = "0.10.2"
 tokio = { version = "1.52.3", features = ["full"] }

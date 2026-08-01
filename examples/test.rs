@@ -2,8 +2,10 @@ use std::{sync::Arc, time::Instant};
 
 use ash::vk;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, uvec2, vec3};
+use rand::random_range;
 use stardust_vulkan::{
     Context,
+    images::{ImageManager, ImageRef, local_image::LocalImage},
     materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager},
     mesh_manager::{MeshManager, VertexData},
     object_manager::{Object, ObjectManager, RenderInvocationData},
@@ -13,12 +15,19 @@ use stardust_vulkan::{
 use tracing::info;
 use vulkano::{
     Validated, VulkanError, VulkanLibrary, VulkanObject,
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsage, RecordingCommandBuffer,
+        CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsage, CopyBufferToImageInfo,
+        RecordingCommandBuffer,
     },
     device::{DeviceExtensions, DeviceFeatures, DeviceOwnedVulkanObject},
     format::Format,
-    image::{Image, ImageLayout, ImageUsage, SampleCount},
+    image::{
+        Image, ImageLayout, ImageUsage, SampleCount,
+        sampler::{Sampler, SamplerCreateInfo},
+    },
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
+    shader::ShaderStages,
     swapchain::{
         AcquireNextImageInfo, AcquiredImage, CompositeAlpha, PresentInfo, SemaphorePresentInfo,
         Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
@@ -50,6 +59,26 @@ async fn main() {
     let pbr_mats = PbrMaterialManager::new();
     let object_manager = ObjectManager::new();
     let mesh_manager = MeshManager::new(&ctx).unwrap();
+    let mut image_manager = ImageManager::new(&ctx, ShaderStages::FRAGMENT);
+    let image = LocalImage::new(
+        &ctx,
+        false,
+        Format::R8G8B8A8_UNORM,
+        None,
+        None,
+        stardust_vulkan::images::ImageResolution::D2([2, 2].into()),
+        1,
+        ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+        Some("Test Texture"),
+        MemoryTypeFilter::PREFER_DEVICE,
+    );
+    let sampler = Sampler::new(
+        ctx.device.clone(),
+        SamplerCreateInfo::default(),
+    )
+    .unwrap();
+    let sampler_ref = image_manager.alloc_sampler(sampler).await.unwrap();
+    let image_ref = image_manager.alloc(&ctx, &image, sampler_ref).await;
     let mesh = mesh_manager
         .alloc(
             &ctx,
@@ -59,7 +88,7 @@ async fn main() {
                 .map(|(pos, normal)| VertexData {
                     pos: pos.into(),
                     normal: normal.into(),
-                    uv: Vec2::ZERO,
+                    uv: Vec2::new(random_range(0.0..1.0), random_range(0.0..1.0)),
                     color: Vec4::ONE,
                 })
                 .collect::<Vec<_>>(),
@@ -72,6 +101,7 @@ async fn main() {
             &ctx,
             PbrData {
                 color: [0.0, 1.0, 0.0, 1.0].into(),
+                color_image: None,
             },
         )
         .await
@@ -80,7 +110,8 @@ async fn main() {
         .alloc(
             &ctx,
             PbrData {
-                color: [1.0, 0.0, 1.0, 1.0].into(),
+                color: [1.0, 1.0, 1.0, 1.0].into(),
+                color_image: Some(image_ref.clone()),
             },
         )
         .await
@@ -90,6 +121,7 @@ async fn main() {
             &ctx,
             PbrData {
                 color: [1.0, 0.0, 0.0, 1.0].into(),
+                color_image: None,
             },
         )
         .await
@@ -129,12 +161,14 @@ async fn main() {
         _pbr_mats: pbr_mats,
         _object_manager: object_manager,
         _mesh_manager: mesh_manager,
+        image_manager,
         recreate_swapchain: None,
-        render_data,
-        start_time: Instant::now(),
         obj_1,
         obj_2,
         obj_3,
+        image_setup: Some(image_ref),
+        render_data,
+        start_time: Instant::now(),
     };
     println!("running app");
     event_loop.run_app(&mut app).unwrap();
@@ -146,10 +180,13 @@ struct App {
     _pbr_mats: PbrMaterialManager,
     _object_manager: ObjectManager,
     _mesh_manager: Arc<MeshManager>,
+    image_manager: ImageManager,
     recreate_swapchain: Option<UVec2>,
     obj_1: Arc<Object<PbrMaterial>>,
     obj_2: Arc<Object<PbrMaterial>>,
     obj_3: Arc<Object<PbrMaterial>>,
+
+    image_setup: Option<Arc<ImageRef>>,
 
     render_data: RenderInvocationData<PbrMaterial>,
     start_time: Instant,
@@ -353,7 +390,7 @@ impl ApplicationHandler for App {
                         world_to_clip: camera_mat,
                     },
                 );
-                let cmds = RecordingCommandBuffer::new(
+                let mut cmds = RecordingCommandBuffer::new(
                     self.ctx.cmd_buf_alloc.clone(),
                     self.ctx.gfx_queue.queue_family_index(),
                     CommandBufferLevel::Primary,
@@ -363,10 +400,77 @@ impl ApplicationHandler for App {
                     },
                 )
                 .unwrap();
+                let mut _buf = None;
+                if let Some(image) = self.image_setup.take() {
+                    let buf: Subbuffer<[[u8; 4]; 4]> = Buffer::new_sized(
+                        self.ctx.alloc.clone(),
+                        BufferCreateInfo {
+                            usage: BufferUsage::TRANSFER_SRC,
+                            ..Default::default()
+                        },
+                        AllocationCreateInfo {
+                            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    *buf.write().unwrap() = [
+                        [255, 0, 255, 255],
+                        [0, 255, 0, 255],
+                        [0, 255, 0, 255],
+                        [255, 0, 255, 255],
+                    ];
+                    unsafe {
+                        cmds.pipeline_barrier(&DependencyInfo {
+                            image_memory_barriers: [ImageMemoryBarrier {
+                                src_stages: PipelineStages::empty(),
+                                src_access: AccessFlags::empty(),
+                                dst_stages: PipelineStages::COPY,
+                                dst_access: AccessFlags::TRANSFER_WRITE,
+                                old_layout: ImageLayout::Undefined,
+                                new_layout: ImageLayout::TransferDstOptimal,
+                                subresource_range: image.image().subresource_range(),
+                                ..ImageMemoryBarrier::image(image.image().clone())
+                            }]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                        cmds.copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(
+                            buf.clone(),
+                            image.image().clone(),
+                        ))
+                        .unwrap();
+                        cmds.pipeline_barrier(&DependencyInfo {
+                            image_memory_barriers: [ImageMemoryBarrier {
+                                src_stages: PipelineStages::COPY,
+                                src_access: AccessFlags::TRANSFER_WRITE,
+                                dst_stages: PipelineStages::FRAGMENT_SHADER,
+                                dst_access: AccessFlags::SHADER_SAMPLED_READ,
+                                old_layout: ImageLayout::TransferDstOptimal,
+                                new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                                subresource_range: image.image().subresource_range(),
+                                ..ImageMemoryBarrier::image(image.image().clone())
+                            }]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    }
+                    _buf = Some(buf);
+                }
                 let (mut cmds, handles) = window_data.render_instance.render(
                     Texture::Image(target_image.clone()),
                     |ctx, mut cmds| {
-                        window_data.opaque.record(&self.render_data, ctx, &mut cmds);
+                        window_data.opaque.record(
+                            &self.render_data,
+                            &self.image_manager,
+                            ctx,
+                            &mut cmds,
+                        );
                         cmds
                     },
                     cmds,
@@ -435,6 +539,7 @@ impl ApplicationHandler for App {
                 });
                 render_complete_fence.wait(None).unwrap();
                 drop(handles);
+                drop(_buf);
             }
             _ => {}
         }

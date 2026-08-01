@@ -14,11 +14,7 @@ use vulkano::{
     image::{
         Image, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageTiling, ImageType, ImageUsage,
         SampleCount, SubresourceLayout,
-        sampler::{
-            ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo,
-            SamplerReductionMode,
-            ycbcr::{SamplerYcbcrConversion, SamplerYcbcrConversionCreateInfo},
-        },
+        sampler::{ComponentMapping, ComponentSwizzle},
         sys::RawImage,
         view::{ImageView, ImageViewCreateInfo},
     },
@@ -29,20 +25,17 @@ use vulkano::{
     sync::Sharing,
 };
 
-use crate::{Context, images::{ImageRefSource, YcbcrMetadata}};
+use crate::{
+    Context,
+    images::{AlphaMode, ImageRefSource, ImageResolution, YcbcrMetadata},
+};
 
 pub struct DmaImage {
     image: Arc<Image>,
     image_view: Arc<ImageView>,
-    sampler: Arc<Sampler>,
     timeline: Arc<TimelineSyncObj>,
+    alpha_mode: Option<AlphaMode>,
     requires_manual_srgb_mapping: bool,
-}
-
-pub enum DmaImageResolution {
-    D1(u32),
-    D2(UVec2),
-    D3(UVec3),
 }
 
 pub enum DmaMemoryPlanes {
@@ -88,7 +81,10 @@ impl DmaImage {
         modifier: u64,
         is_srgb: bool,
         ycbcr_metadata: Option<YcbcrMetadata>,
-        res: DmaImageResolution,
+        // TODO: should this be an Option? there are formats without alpha (in addition to fourccs
+        // that swizzle it to 1)
+        alpha_mode: AlphaMode,
+        res: ImageResolution,
         layers: u32,
         planes: DmaMemoryPlanes,
         timeline: impl Into<Arc<TimelineSyncObj>>,
@@ -98,8 +94,9 @@ impl DmaImage {
         // TODO: return error instead
     ) -> Self {
         let format_info = map_fourcc(fourcc).unwrap();
-        let requires_manual_srgb_mapping = is_srgb && format_info.native_srgb_format.is_none();
-        let format = if is_srgb && let Some(f) = format_info.native_srgb_format {
+        let requires_manual_srgb_mapping = (is_srgb && format_info.native_srgb_format.is_none())
+            || alpha_mode == AlphaMode::PremultipliedElectrical;
+        let format = if requires_manual_srgb_mapping.not() && let Some(f) = format_info.native_srgb_format {
             f
         } else {
             format_info.linear_format
@@ -125,19 +122,10 @@ impl DmaImage {
                 } else {
                     ImageCreateFlags::empty()
                 },
-                image_type: match res {
-                    DmaImageResolution::D1(_) => ImageType::Dim1d,
-                    DmaImageResolution::D2(_) => ImageType::Dim2d,
-                    DmaImageResolution::D3(_) => ImageType::Dim3d,
-                },
+                image_type: res.image_type(),
                 format,
                 view_formats: vec![],
-                extent: match res {
-                    // pretty sure this actually has to be 0 instead of 1?
-                    DmaImageResolution::D1(x) => [x, 1, 1],
-                    DmaImageResolution::D2(UVec2 { x, y }) => [x, y, 1],
-                    DmaImageResolution::D3(UVec3 { x, y, z }) => [x, y, z],
-                },
+                extent: res.extents(),
                 array_layers: layers,
                 // TODO: expose?
                 mip_levels: 1,
@@ -189,43 +177,10 @@ impl DmaImage {
         if !format_info.is_ycbcr && ycbcr_metadata.is_some() {
             panic!("ycbcr metadata provided for non ycbcr format");
         }
-        let ycbcr_conv = if format_info.is_ycbcr
-            && let Some(metadata) = ycbcr_metadata
-        {
-            let linear_filter = format_props
-                .drm_format_modifier_tiling_features
-                .contains(FormatFeatures::SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER);
-            Some(
-                SamplerYcbcrConversion::new(
-                    ctx.device.clone(),
-                    SamplerYcbcrConversionCreateInfo {
-                        format,
-                        ycbcr_model: metadata.coefficients,
-                        ycbcr_range: metadata.range,
-                        component_mapping: format_info.swizzle,
-                        chroma_offset: [metadata.chroma_location_x, metadata.chroma_location_y],
-                        chroma_filter: if linear_filter {
-                            Filter::Linear
-                        } else {
-                            Filter::Nearest
-                        },
-                        ..Default::default()
-                    },
-                )
-                .unwrap(),
-            )
-        } else {
-            None
-        };
         let image_view = ImageView::new(
             image.clone(),
             ImageViewCreateInfo {
-                component_mapping: format_info
-                    .is_ycbcr
-                    .not()
-                    .then_some(format_info.swizzle)
-                    .unwrap_or(ComponentMapping::identity()),
-                sampler_ycbcr_conversion: ycbcr_conv.clone(),
+                component_mapping: format_info.swizzle,
                 ..ImageViewCreateInfo::from_image(&image)
             },
         )
@@ -235,21 +190,14 @@ impl DmaImage {
             _ = image_view.set_debug_utils_object_name(Some(&format!("{debug_name} View")));
         }
 
-        let sampler = Sampler::new(
-            ctx.device.clone(),
-            SamplerCreateInfo {
-                reduction_mode: SamplerReductionMode::Min,
-                sampler_ycbcr_conversion: ycbcr_conv,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let format_has_alpha =
+            format.components()[3] != 0 && format_info.swizzle.a != ComponentSwizzle::One;
         Self {
             image,
             image_view,
-            sampler,
             timeline: timeline.into(),
             requires_manual_srgb_mapping,
+            alpha_mode: format_has_alpha.then_some(alpha_mode),
         }
     }
 
@@ -315,7 +263,33 @@ fn import_mem(
     }
 }
 
-impl ImageRefSource for DmaImage {}
+impl ImageRefSource for DmaImage {
+    fn get_image_ref_info(&self) -> super::ImageRefInfo {
+        let requires_unmultiply = self.alpha_mode.is_some_and(|v| match v {
+            AlphaMode::PremultipliedElectrical => true,
+            AlphaMode::PremultipliedOptical => false,
+            AlphaMode::Unpremmultiplied => false,
+        });
+        let requires_multiply = self.alpha_mode.is_some_and(|v| match v {
+            AlphaMode::PremultipliedElectrical => true,
+            AlphaMode::PremultipliedOptical => false,
+            AlphaMode::Unpremmultiplied => true,
+        });
+        super::ImageRefInfo {
+            requires_software_srgb: self.requires_manual_srgb_mapping,
+            requires_unmultiplication: requires_unmultiply,
+            requires_multiplication: requires_multiply,
+        }
+    }
+
+    fn get_image(&self) -> Arc<Image> {
+        self.image.clone()
+    }
+
+    fn get_image_view(&self) -> Arc<ImageView> {
+        self.image_view.clone()
+    }
+}
 
 pub struct FormatInfo {
     pub linear_format: Format,
