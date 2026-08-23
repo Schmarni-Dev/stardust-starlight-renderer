@@ -4,7 +4,7 @@ use ash::vk;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, uvec2, vec3};
 use rand::random_range;
 use stardust_vulkan::{
-    Context,
+    ApplicationInfo, Context,
     images::{ImageManager, ImageRef, local_image::LocalImage},
     materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager},
     mesh_manager::{MeshManager, VertexData},
@@ -14,7 +14,7 @@ use stardust_vulkan::{
 };
 use tracing::info;
 use vulkano::{
-    Validated, VulkanError, VulkanLibrary, VulkanObject,
+    Validated, Version, VulkanError, VulkanLibrary, VulkanObject,
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsage, CopyBufferToImageInfo,
@@ -48,7 +48,15 @@ async fn main() {
     let event_loop = EventLoop::new().unwrap();
 
     let ctx = Context::new(
-        entry,
+        &entry,
+        ApplicationInfo {
+            name: Some("Test App".into()),
+            version: Version {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+        },
         Surface::required_extensions(&event_loop).unwrap(),
         DeviceExtensions {
             khr_swapchain: true,
@@ -72,11 +80,7 @@ async fn main() {
         Some("Test Texture"),
         MemoryTypeFilter::PREFER_DEVICE,
     );
-    let sampler = Sampler::new(
-        ctx.device.clone(),
-        SamplerCreateInfo::default(),
-    )
-    .unwrap();
+    let sampler = Sampler::new(ctx.device.clone(), SamplerCreateInfo::default()).unwrap();
     let sampler_ref = image_manager.alloc_sampler(sampler).await.unwrap();
     let image_ref = image_manager.alloc(&ctx, &image, sampler_ref).await;
     let mesh = mesh_manager

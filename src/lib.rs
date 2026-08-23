@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use vulkano::{
-    Version, VulkanLibrary,
+    Validated, Version, VulkanError, VulkanLibrary,
     command_buffer::allocator::{
         StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
     },
@@ -37,13 +37,73 @@ pub struct Context {
     pub descriptor_set_alloc: Arc<StandardDescriptorSetAllocator>,
     pub gfx_queue: Arc<Queue>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationInfo {
+    pub name: Option<String>,
+    pub version: Version,
+}
 impl Context {
     // TODO: proper error handling
     pub fn new(
-        entry: Arc<VulkanLibrary>,
+        entry: &Arc<VulkanLibrary>,
+        app_info: ApplicationInfo,
         additional_instance_exts: InstanceExtensions,
         additional_device_exts: DeviceExtensions,
         additional_device_features: DeviceFeatures,
+    ) -> Self {
+        Self::new_custom_init(
+            entry,
+            app_info,
+            additional_instance_exts,
+            additional_device_exts,
+            additional_device_features,
+            |info| Instance::new(entry.clone(), info),
+            |instance, required_device_extensions, required_device_features| {
+                let mut devs = instance
+                    .enumerate_physical_devices()
+                    .unwrap()
+                    .collect::<Vec<_>>();
+                devs.sort_by_key(|dev| match dev.properties().device_type {
+                    PhysicalDeviceType::DiscreteGpu => 0,
+                    PhysicalDeviceType::IntegratedGpu => 1,
+                    PhysicalDeviceType::VirtualGpu => 2,
+                    PhysicalDeviceType::Cpu => 3,
+                    PhysicalDeviceType::Other => 4,
+                    _ => 5,
+                });
+                let phys_dev = devs
+                    .into_iter()
+                    .find(|dev| {
+                        dbg!(required_device_extensions.difference(dev.supported_extensions()));
+                        dbg!(required_device_features.difference(dev.supported_features()));
+                        dev.supported_extensions()
+                            .contains(&required_device_extensions)
+                            && dev.supported_features().contains(&required_device_features)
+                    })
+                    .expect("no suitable device found");
+                Ok(phys_dev)
+            },
+            |phys_dev, info| Device::new(phys_dev.clone(), info),
+        )
+    }
+    pub fn new_custom_init<I: ExactSizeIterator<Item = Arc<Queue>>>(
+        entry: &Arc<VulkanLibrary>,
+        app_info: ApplicationInfo,
+        additional_instance_exts: InstanceExtensions,
+        additional_device_exts: DeviceExtensions,
+        additional_device_features: DeviceFeatures,
+        instance_create: impl FnOnce(
+            InstanceCreateInfo,
+        ) -> Result<Arc<Instance>, Validated<VulkanError>>,
+        select_phys_dev: impl FnOnce(
+            &Arc<Instance>,
+            &DeviceExtensions,
+            &DeviceFeatures,
+        ) -> Result<Arc<PhysicalDevice>, Validated<VulkanError>>,
+        device_create: impl FnOnce(
+            &Arc<PhysicalDevice>,
+            DeviceCreateInfo,
+        ) -> Result<(Arc<Device>, I), Validated<VulkanError>>,
     ) -> Self {
         let required_exts = InstanceExtensions {
             khr_external_memory_capabilities: true,
@@ -57,40 +117,21 @@ impl Context {
         if !supported_exts.contains(&required_exts) {
             panic!("required exts are not supported: {:#?}", supported_exts);
         }
-        let instance = Instance::new(
-            entry,
-            InstanceCreateInfo {
-                application_name: Some("Test App".into()),
-                application_version: Version {
-                    major: 0,
-                    minor: 1,
-                    patch: 0,
-                },
-                engine_name: Some("stardust-vulkan".into()),
-                engine_version: Version {
-                    major: 0,
-                    minor: 1,
-                    patch: 0,
-                },
-                max_api_version: Some(Version::V1_3),
-                enabled_extensions: required_exts,
-                // TODO: handle debug messages
-                ..Default::default()
+        let instance = instance_create(InstanceCreateInfo {
+            application_name: app_info.name,
+            application_version: app_info.version,
+            engine_name: Some("stardust-vulkan".into()),
+            engine_version: Version {
+                major: 0,
+                minor: 1,
+                patch: 0,
             },
-        )
+            max_api_version: Some(Version::V1_3),
+            enabled_extensions: required_exts,
+            // TODO: handle debug messages
+            ..Default::default()
+        })
         .unwrap();
-        let mut devs = instance
-            .enumerate_physical_devices()
-            .unwrap()
-            .collect::<Vec<_>>();
-        devs.sort_by_key(|dev| match dev.properties().device_type {
-            PhysicalDeviceType::DiscreteGpu => 0,
-            PhysicalDeviceType::IntegratedGpu => 1,
-            PhysicalDeviceType::VirtualGpu => 2,
-            PhysicalDeviceType::Cpu => 3,
-            PhysicalDeviceType::Other => 4,
-            _ => 5,
-        });
         let required_device_extensions = DeviceExtensions {
             ext_image_drm_format_modifier: true,
             khr_dynamic_rendering_local_read: true,
@@ -136,18 +177,12 @@ impl Context {
             independent_blend: true,
             ..Default::default()
         } | additional_device_features;
-
-        let phys_dev = devs
-            .into_iter()
-            .find(|dev| {
-                dbg!(required_device_extensions.difference(dev.supported_extensions()));
-                dbg!(required_device_features.difference(dev.supported_features()));
-                dev.supported_extensions()
-                    .contains(&required_device_extensions)
-                    && dev.supported_features().contains(&required_device_features)
-            })
-            .expect("no suitable device found");
-
+        let phys_dev = select_phys_dev(
+            &instance,
+            &required_device_extensions,
+            &required_device_features,
+        )
+        .expect("failed to select phys dev");
         let info = phys_dev.queue_family_properties();
         let mut graphics_queue_family_index = None;
         for (i, info) in info.into_iter().enumerate() {
@@ -161,21 +196,18 @@ impl Context {
             }
         }
         let gfx_queue_family = graphics_queue_family_index.expect("no graphics queue") as u32;
-        let (device, mut queues) = Device::new(
-            phys_dev.clone(),
-            DeviceCreateInfo {
-                queue_create_infos: vec![QueueCreateInfo {
-                    flags: QueueCreateFlags::empty(),
-                    queue_family_index: gfx_queue_family,
-                    queues: vec![1.0],
-                    ..Default::default()
-                }],
-                enabled_extensions: required_device_extensions,
-                enabled_features: required_device_features,
+        let device_create_info = DeviceCreateInfo {
+            queue_create_infos: vec![QueueCreateInfo {
+                flags: QueueCreateFlags::empty(),
+                queue_family_index: gfx_queue_family,
+                queues: vec![1.0],
                 ..Default::default()
-            },
-        )
-        .unwrap();
+            }],
+            enabled_extensions: required_device_extensions,
+            enabled_features: required_device_features,
+            ..Default::default()
+        };
+        let (device, mut queues) = device_create(&phys_dev, device_create_info).unwrap();
         let gfx_queue = queues.next().unwrap();
         Self {
             alloc: Arc::new(StandardMemoryAllocator::new_default(device.clone())),
