@@ -25,7 +25,7 @@ use vulkano::{
 };
 
 use crate::{
-    Context, images::ImageManager, materials::{image_common, simple_pbr::PbrMaterial}, mesh_manager::VertexData, object_manager::RenderInvocationData, render::{RenderContext, SubPass}
+    Context, images::ImageManager, materials::{image_common, simple_pbr::PbrMaterial}, mesh_manager::VertexData, object_manager::RenderInvocationData, render::{RenderContext, SubPass, ViewData}
 };
 
 pub struct SimpleOpaque {
@@ -61,7 +61,11 @@ impl SubPass<PbrMaterial> for SimpleOpaque {
 
 impl SimpleOpaque {
     // TODO: error handling
-    pub fn new(ctx: &Context, opaque_format: Format, depth_format: Format) -> Self {
+    pub fn new(ctx: &Context, opaque_format: Format, depth_format: Format,views: &[ViewData]) -> Self {
+        let mut view_mask = 0;
+        for i in 0..views.len() {
+            view_mask |= 1 << i;
+        }
         let vs = crate::pipeline_pieces::mesh_vertex_shader::load(ctx.device.clone())
             .unwrap()
             .entry_point("main")
@@ -160,7 +164,7 @@ impl SimpleOpaque {
                     subpass: Some(PipelineSubpassType::BeginRendering(
                         PipelineRenderingCreateInfo {
                             // TODO: properly handle mutliview
-                            view_mask: 0,
+                            view_mask,
                             color_attachment_formats: vec![
                                 Some(opaque_format),
                                 Some(Format::R16G16B16A16_SFLOAT),

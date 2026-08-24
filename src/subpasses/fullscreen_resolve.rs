@@ -32,7 +32,7 @@ use vulkano::{
     },
 };
 
-use crate::{Context, render::RenderContext};
+use crate::{Context, render::{RenderContext, ViewData}};
 #[derive(Debug, BufferContents, Vertex, Clone, Copy)]
 #[repr(C)]
 struct SimpleVertex {
@@ -73,7 +73,11 @@ impl FullscreenResolve {
                 .unwrap();
         }
     }
-    pub fn new(ctx: &Context, opaque_format: Format) -> Self {
+    pub fn new(ctx: &Context, opaque_format: Format, views: &[ViewData]) -> Self {
+        let mut view_mask = 0;
+        for i in 0..views.len() {
+            view_mask |= 1 << i;
+        }
         let vs = vs::load(ctx.device.clone())
             .unwrap()
             .entry_point("main")
@@ -158,7 +162,7 @@ impl FullscreenResolve {
                     subpass: Some(PipelineSubpassType::BeginRendering(
                         PipelineRenderingCreateInfo {
                             // TODO: properly handle mutliview
-                            view_mask: 0,
+                            view_mask,
                             // TODO: fill all formats here
                             color_attachment_formats: vec![
                                 Some(opaque_format),

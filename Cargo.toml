@@ -3,6 +3,10 @@ name = "stardust-vulkan"
 version = "0.1.0"
 edition = "2024"
 
+# this patch is needed for OpenXR support, its only used in the related examples and code that uses this crate
+[patch.crates-io]
+vulkano = { git = "https://github.com/Schmarni-Dev/vulkano", branch = "custom_new_closure_0_35" }
+
 [dependencies]
 ash = "0.38.0"
 drm-fourcc = "2.2.0"
@@ -17,8 +21,15 @@ vulkano = { version = "0.35.2", default-features = false, features = [
 	"document_unchecked",
 ] }
 vulkano-shaders = "0.35.0"
-winit = { version = "0.30.13", default-features = false, features = ["wayland", "mint", "rwh_06", "x11"] }
 
 [dev-dependencies]
+openxr = { version = "0.21.1", features = ["mint"] }
 rand = "0.10.2"
 tokio = { version = "1.52.3", features = ["full"] }
+winit = { version = "0.30.13", default-features = false, features = [
+	"wayland",
+	"mint",
+	"rwh_06",
+	"x11",
+] }
+mint = "0.5.9"

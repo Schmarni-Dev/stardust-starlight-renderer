@@ -20,8 +20,11 @@ use vulkano::{
 };
 
 use crate::{
-    Context, images::{ImageManager, transient_attachment::TransientAttachment}, materials::MaterialHandle,
-    object_manager::RenderInvocationData, subpasses::fullscreen_resolve::FullscreenResolve,
+    Context,
+    images::{ImageManager, transient_attachment::TransientAttachment},
+    materials::MaterialHandle,
+    object_manager::RenderInvocationData,
+    subpasses::fullscreen_resolve::FullscreenResolve,
 };
 
 pub trait SubPass<Material: MaterialHandle> {
@@ -52,6 +55,7 @@ pub struct RenderInstance {
     resolution: UVec3,
     previous_wboit_revealage: Arc<Image>,
     views: Subbuffer<[ViewData]>,
+    multiview_mask: u32,
     depth_format: Format,
     fullscreen_pass: FullscreenResolve,
     render_ctx: RenderContext,
@@ -180,13 +184,18 @@ impl RenderInstance {
             previous_wboit_revealage: previous_wboit_revealage.clone(),
             views_bda: views_buffer.device_address().unwrap().get(),
         };
+        let mut multiview_mask = 0;
+        for i in 0..views.len() {
+            multiview_mask |= 1 << i;
+        }
         Self {
             resolution,
             previous_wboit_revealage,
             views: views_buffer,
             depth_format,
-            fullscreen_pass: FullscreenResolve::new(ctx, color_format),
+            fullscreen_pass: FullscreenResolve::new(ctx, color_format, views),
             render_ctx,
+            multiview_mask,
         }
     }
     pub fn update_view(&self, view_index: usize, data: ViewData) {
@@ -273,7 +282,7 @@ impl RenderInstance {
             .begin_rendering(&RenderingInfo {
                 layer_count: 1,
                 // TODO: handle multiview
-                view_mask: 0,
+                view_mask: self.multiview_mask,
                 color_attachments: vec![
                     Some(RenderingAttachmentInfo {
                         load_op: AttachmentLoadOp::Clear,
