@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, uvec2, vec3};
 use rand::random_range;
-use stardust_vulkan::{
+use starlight_renderer::{
     ApplicationInfo, Context,
     command_buffer::StarlightCommandBuffer,
     images::{ImageManager, local_image::LocalImage, wsi_swapchain::WsiSwapchainImage},
@@ -76,7 +76,7 @@ async fn main() {
         Format::R8G8B8A8_UNORM,
         None,
         None,
-        stardust_vulkan::images::ImageResolution::D2([2, 2].into()),
+        starlight_renderer::images::ImageResolution::D2([2, 2].into()),
         1,
         ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
         Some("Test Texture"),

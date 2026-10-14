@@ -1,6 +1,6 @@
 [package]
-name = "stardust-vulkan"
-version = "0.1.0"
+name = "starlight-renderer"
+version = "0.0.1"
 edition = "2024"
 
 # this patch is needed for OpenXR support, its only used in the related examples and code that uses this crate

@@ -128,7 +128,7 @@ impl Context {
         let instance = instance_create(InstanceCreateInfo {
             application_name: app_info.name,
             application_version: app_info.version,
-            engine_name: Some("stardust-vulkan".into()),
+            engine_name: Some("Starlight Renderer".into()),
             engine_version: Version {
                 major: 0,
                 minor: 1,

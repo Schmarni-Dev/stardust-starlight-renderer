@@ -1557,8 +1557,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "stardust-vulkan"
-version = "0.1.0"
+name = "starlight-renderer"
+version = "0.0.1"
 dependencies = [
  "ash",
  "bytemuck",
