@@ -6,9 +6,7 @@ use std::sync::{
 use glam::UVec2;
 use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
 use vulkano::{
-    Handle as _,
-    format::Format,
-    image::{
+    Handle as _, VulkanError, device::DeviceOwnedVulkanObject as _, format::Format, image::{
         Image, ImageLayout, ImageUsage,
         sys::RawImage,
         view::{ImageView, ImageViewCreateInfo},
@@ -25,6 +23,7 @@ pub enum OpenXRAttachmentType {
     Color,
 }
 
+#[derive(Clone)]
 pub struct OpenXRAttachment {
     image: Arc<Image>,
     image_view: Arc<ImageView>,
@@ -72,6 +71,12 @@ impl OpenXRAttachment {
             attachment_type,
             image_view,
         }
+    }
+    pub fn image_set_debug_label(&self, name: Option<&str>) -> Result<(), VulkanError> {
+        self.image.set_debug_utils_object_name(name)
+    }
+    pub fn image_view_set_debug_label(&self, name: Option<&str>) -> Result<(), VulkanError> {
+        self.image_view.set_debug_utils_object_name(name)
     }
     /// # Safety
     /// this needs to be called after openxr_swapchain.acquire_image() and
@@ -125,7 +130,7 @@ impl ImageWriteOp for OpenXRAttachmentWriteOp {
     }
 
     fn image_view(&self) -> &Arc<ImageView> {
-        todo!()
+        &self.image_view
     }
 
     fn current_layout(&self) -> ImageLayout {

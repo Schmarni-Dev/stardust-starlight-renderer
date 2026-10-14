@@ -40,6 +40,9 @@ impl StarlightQueue {
     pub fn queue_family_index(&self) -> u32 {
         self.inner.queue_family_index()
     }
+    pub fn queue_index(&self) -> u32 {
+        self.inner.queue_index()
+    }
     // TODO: add additional wait and signal things
     pub async fn submit(
         &self,

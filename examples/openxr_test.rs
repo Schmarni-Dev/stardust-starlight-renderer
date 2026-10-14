@@ -16,31 +16,31 @@ use openxr::{
 use rand::random_range;
 use stardust_vulkan::{
     ApplicationInfo, Context,
-    images::{ImageManager, local_image::LocalImage},
+    command_buffer::StarlightCommandBuffer,
+    images::{
+        ImageManager,
+        local_image::LocalImage,
+        openxr_attachment::{OpenXRAttachment, OpenXRAttachmentType},
+    },
     materials::simple_pbr::{PbrData, PbrMaterialManager},
     mesh_manager::{MeshManager, VertexData},
     object_manager::{ObjectManager, RenderInvocationData},
-    render::{RenderInstance, SubPass, Texture, ViewData},
+    queue::SyncPoint,
+    render::{RenderInstance, SubPass, ViewData},
     subpasses::simple_opaque::SimpleOpaque,
 };
+use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
 use vulkano::{
     Handle, Version, VulkanError, VulkanLibrary, VulkanObject,
-    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
-    command_buffer::{
-        CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsage, CopyBufferToImageInfo,
-        RecordingCommandBuffer,
-    },
-    device::{DeviceExtensions, DeviceFeatures, DeviceOwnedVulkanObject},
+    device::{DeviceExtensions, DeviceFeatures},
     format::Format,
     image::{
-        ImageLayout, ImageUsage, SampleCount,
+        ImageUsage, SampleCount,
         sampler::{Sampler, SamplerCreateInfo},
-        sys::RawImage,
     },
     instance::{Instance, InstanceExtensions},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
+    memory::allocator::MemoryTypeFilter,
     shader::ShaderStages,
-    sync::{AccessFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages, fence::Fence},
 };
 
 static VK_ENTRY: OnceLock<Arc<VulkanLibrary>> = OnceLock::new();
@@ -183,9 +183,23 @@ async fn main() {
         Some("Test Texture"),
         MemoryTypeFilter::PREFER_DEVICE,
     );
+    image
+        .new_write_op()
+        .upload_tmp_staged(
+            &ctx,
+            &[
+                [255, 0u8, 255, 255],
+                [0u8, 255, 0u8, 255],
+                [0u8, 255, 0u8, 255],
+                [255, 0u8, 255, 255],
+            ],
+        )
+        .await;
     let sampler = Sampler::new(ctx.device.clone(), SamplerCreateInfo::default()).unwrap();
     let sampler_ref = image_manager.alloc_sampler(sampler).await.unwrap();
-    let image_ref = image_manager.alloc(&ctx, &image, sampler_ref).await;
+    let image_ref = image
+        .new_read_op(&ctx, &mut image_manager, sampler_ref)
+        .await;
     let mesh = mesh_manager
         .alloc(
             &ctx,
@@ -319,34 +333,25 @@ async fn main() {
         .enumerate_images()
         .unwrap()
         .into_iter()
-        .map(|i| unsafe {
-            RawImage::from_handle_borrowed(
-                ctx.device.clone(),
-                ash::vk::Image::from_raw(i),
-                vulkano::image::ImageCreateInfo {
-                    image_type: vulkano::image::ImageType::Dim2d,
-                    format,
-                    extent: [res.x, res.y, 1],
-                    array_layers: image_array_layers,
-                    mip_levels: 1,
-                    samples: vulkano::image::SampleCount::Sample1,
-                    usage: ImageUsage::COLOR_ATTACHMENT,
-                    initial_layout: ImageLayout::ColorAttachmentOptimal,
-                    ..Default::default()
-                },
+        .map(|handle| {
+            OpenXRAttachment::from_raw(
+                &ctx,
+                handle,
+                format,
+                res,
+                image_array_layers,
+                OpenXRAttachmentType::Color,
             )
-            .unwrap()
-            .assume_bound()
         })
-        .map(Arc::new)
         .collect::<Vec<_>>();
     let ref_space = oxr_session
         .create_reference_space(ReferenceSpaceType::LOCAL, Posef::IDENTITY)
         .unwrap();
 
-    let mut image_setup = Some(image_ref);
     let mut session_running = false;
     let mut opaque = SimpleOpaque::new(&ctx, format, Format::D32_SFLOAT, &views);
+    let frame_timeline = Arc::new(TimelineSyncObj::new(&ctx.drm_render_node).unwrap());
+    let mut frame_wait_point = 1u64;
     let start_time = Instant::now();
     loop {
         let mut event_buffer = openxr::EventDataBuffer::new();
@@ -395,110 +400,49 @@ async fn main() {
             .wait_image(openxr::Duration::INFINITE)
             .unwrap();
         let target_image = swapchain_images[image_index as usize].clone();
+        let acquired_target = unsafe { target_image.acquire().unwrap() };
 
         target_image
-            .set_debug_utils_object_name(Some(&format!("Target Image {image_index}")))
+            .image_set_debug_label(Some(&format!("Target Image {image_index}")))
+            .unwrap();
+        target_image
+            .image_view_set_debug_label(Some(&format!("Target Image View {image_index}")))
             .unwrap();
 
         let t = start_time.elapsed().as_secs_f32().sin();
         let t2 = (start_time.elapsed().as_secs_f32() + 0.25).sin();
         let t3 = (start_time.elapsed().as_secs_f32() * 1.5 + 0.60).cos();
-        obj_1.update_global_transform(
-            Mat4::from_translation(vec3(t3 * 0.1, (t2 * 0.15) + 0.1, (t * -0.25) + -0.25))
-                * Mat4::from_scale(Vec3::splat(0.001)),
-        );
-        obj_2.update_global_transform(
-            Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
-                * Mat4::from_scale(Vec3::splat(t * 0.002)),
-        );
-        obj_3.update_global_transform(
-            Mat4::from_translation(vec3(0.15, 0.15, -0.251))
-                * Mat4::from_scale(Vec3::splat(0.001))
-                * Mat4::from_rotation_y(start_time.elapsed().as_secs_f32()),
-        );
-
-        let mut cmds = RecordingCommandBuffer::new(
-            ctx.cmd_buf_alloc.clone(),
-            ctx.gfx_queue.queue_family_index(),
-            CommandBufferLevel::Primary,
-            CommandBufferBeginInfo {
-                usage: CommandBufferUsage::OneTimeSubmit,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mut _buf = None;
-        if let Some(image) = image_setup.take() {
-            let buf: Subbuffer<[[u8; 4]; 4]> = Buffer::new_sized(
-                ctx.alloc.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::TRANSFER_SRC,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
+        obj_1
+            .update_global_transform(
+                Mat4::from_translation(vec3(t3 * 0.1, (t2 * 0.15) + 0.1, (t * -0.25) + -0.25))
+                    * Mat4::from_scale(Vec3::splat(0.001)),
             )
-            .unwrap();
-            *buf.write().unwrap() = [
-                [255, 0, 255, 255],
-                [0, 255, 0, 255],
-                [0, 255, 0, 255],
-                [255, 0, 255, 255],
-            ];
-            unsafe {
-                cmds.pipeline_barrier(&DependencyInfo {
-                    image_memory_barriers: [ImageMemoryBarrier {
-                        src_stages: PipelineStages::empty(),
-                        src_access: AccessFlags::empty(),
-                        dst_stages: PipelineStages::COPY,
-                        dst_access: AccessFlags::TRANSFER_WRITE,
-                        old_layout: ImageLayout::Undefined,
-                        new_layout: ImageLayout::TransferDstOptimal,
-                        subresource_range: image.image().subresource_range(),
-                        ..ImageMemoryBarrier::image(image.image().clone())
-                    }]
-                    .into_iter()
-                    .collect(),
-                    ..Default::default()
-                })
-                .unwrap();
-                cmds.copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(
-                    buf.clone(),
-                    image.image().clone(),
-                ))
-                .unwrap();
-                cmds.pipeline_barrier(&DependencyInfo {
-                    image_memory_barriers: [ImageMemoryBarrier {
-                        src_stages: PipelineStages::COPY,
-                        src_access: AccessFlags::TRANSFER_WRITE,
-                        dst_stages: PipelineStages::FRAGMENT_SHADER,
-                        dst_access: AccessFlags::SHADER_SAMPLED_READ,
-                        old_layout: ImageLayout::TransferDstOptimal,
-                        new_layout: ImageLayout::ShaderReadOnlyOptimal,
-                        subresource_range: image.image().subresource_range(),
-                        ..ImageMemoryBarrier::image(image.image().clone())
-                    }]
-                    .into_iter()
-                    .collect(),
-                    ..Default::default()
-                })
-                .unwrap();
-            }
-            _buf = Some(buf);
-        }
-        let (cmds, handles) = render_instance.render(
-            Texture::Image(target_image.clone()),
+            .await;
+        obj_2
+            .update_global_transform(
+                Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
+                    * Mat4::from_scale(Vec3::splat(t * 0.002)),
+            )
+            .await;
+        obj_3
+            .update_global_transform(
+                Mat4::from_translation(vec3(0.15, 0.15, -0.251))
+                    * Mat4::from_scale(Vec3::splat(0.001))
+                    * Mat4::from_rotation_y(start_time.elapsed().as_secs_f32()),
+            )
+            .await;
+
+        let cmds =
+            StarlightCommandBuffer::new(&ctx, ctx.gfx_queue.queue_family_index()).unwrap();
+        let cmds = render_instance.render(
+            acquired_target.write(),
             |ctx, mut cmds| {
                 opaque.record(&render_data, &image_manager, ctx, &mut cmds);
                 cmds
             },
             cmds,
         );
-        let command_buffer = unsafe { Arc::new(cmds.end().unwrap()) };
-        let render_complete_fence = Fence::from_pool(ctx.device.clone()).unwrap();
+
         let (view_state, view_info) = oxr_session
             .locate_views(
                 ViewConfigurationType::PRIMARY_STEREO,
@@ -520,24 +464,18 @@ async fn main() {
                 render_instance.update_view(i, ViewData { world_to_clip: mat });
             }
         }
-        ctx.gfx_queue.with(|_queue| unsafe {
-            let queue = ctx.gfx_queue.handle();
-            let fns = ctx.device.fns();
-            let ash_dev = ash::Device::from_parts_1_3(
-                ctx.device.handle(),
-                fns.v1_0.clone(),
-                fns.v1_1.clone(),
-                fns.v1_2.clone(),
-                fns.v1_3.clone(),
-            );
-            ash_dev
-                .queue_submit(
-                    queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[command_buffer.handle()])],
-                    render_complete_fence.handle(),
-                )
-                .unwrap();
-        });
+        let frame_point = frame_wait_point;
+        frame_wait_point += 1;
+        ctx.gfx_queue
+            .submit(
+                cmds,
+                vec![],
+                vec![SyncPoint::TimelineSyncObj {
+                    timeline: frame_timeline.clone(),
+                    point: frame_point,
+                }],
+            )
+            .await;
         ctx.gfx_queue
             .with(|_| oxr_swapchain.release_image().unwrap());
         let layer_views = view_info
@@ -574,9 +512,7 @@ async fn main() {
                 )
             })
             .inspect_err(|err| println!("failed to submit full end_frame {err}"));
-        render_complete_fence.wait(None).unwrap();
-        drop(_buf);
-        drop(handles);
+        frame_timeline.blocking_wait(frame_point, None).unwrap();
     }
 }
 
