@@ -5,10 +5,13 @@ use timeline_syncobj::{render_node::DrmRenderNode, timeline_syncobj::TimelineSyn
 use tokio::task::JoinSet;
 use vulkano::{
     VulkanObject as _,
-    device::QueueGuard,
-    sync::semaphore::{
-        ExternalSemaphoreHandleType, ExternalSemaphoreHandleTypes, ImportSemaphoreFdInfo,
-        Semaphore, SemaphoreCreateInfo, SemaphoreImportFlags,
+    device::{DeviceOwnedVulkanObject, QueueGuard},
+    sync::{
+        fence::Fence,
+        semaphore::{
+            ExternalSemaphoreHandleType, ExternalSemaphoreHandleTypes, ImportSemaphoreFdInfo,
+            Semaphore, SemaphoreCreateInfo, SemaphoreImportFlags,
+        },
     },
 };
 
@@ -30,6 +33,9 @@ impl StarlightQueue {
     }
     pub fn with<'a, R>(&'a self, func: impl FnOnce(QueueGuard<'a>) -> R) -> R {
         self.inner.with(func)
+    }
+    pub fn set_debug_label(&self, name: Option<&str>) -> Result<(), vulkano::VulkanError> {
+        self.inner.set_debug_utils_object_name(name)
     }
     pub fn queue_family_index(&self) -> u32 {
         self.inner.queue_family_index()
@@ -82,7 +88,13 @@ impl StarlightQueue {
                 // TODO: probably remove this unwrap, there shouldn't be an error for a missing point (if used
                 // properly by potentially other processes), but we shouldn't unwrap on this
                 let sync_file = v.0.export_sync_file_point(v.1).unwrap();
-                let semaphore = Semaphore::from_pool(self.inner.device().clone()).unwrap();
+                // TODO: can this be optimized?
+                let semaphore =
+                    Semaphore::new(self.inner.device().clone(), SemaphoreCreateInfo::default())
+                        .unwrap();
+                semaphore
+                    .set_debug_utils_object_name(Some("acquire semaphore"))
+                    .unwrap();
                 unsafe {
                     semaphore
                         .import_fd(ImportSemaphoreFdInfo {
@@ -106,6 +118,9 @@ impl StarlightQueue {
             },
         )
         .unwrap();
+        task_semaphore
+            .set_debug_utils_object_name(Some("task semaphore"))
+            .unwrap();
         let write_semaphores = command_buffer
             .used_writes
             .iter()
@@ -120,9 +135,14 @@ impl StarlightQueue {
                 // TODO: probably don't unwrap here
                 .unwrap()
             })
+            .inspect(|v| {
+                v.set_debug_utils_object_name(Some("write semaphore"))
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
 
         let cmd_buffer = unsafe { command_buffer.inner.end() }.unwrap();
+        let fence = Fence::from_pool(self.inner.device().clone()).unwrap();
         tracing::trace!("about to submit work");
         // TODO: rework this to use vulkanos stuff after the next vulkano release
         self.inner.with(|_| {
@@ -152,19 +172,19 @@ impl StarlightQueue {
                 }))
                 .map(|v| v.handle())
                 .collect::<Vec<_>>();
-            // let wait_semaphores = vec![];
-            // let signal_semaphores = vec![];
+            let stages = vec![vk::PipelineStageFlags::TOP_OF_PIPE; wait_semaphores.len()];
+
             unsafe {
                 ash_dev
                     .queue_submit(
                         queue,
                         &[vk::SubmitInfo::default()
                             // TODO: optimize this maybe?
-                            .wait_dst_stage_mask(&[vk::PipelineStageFlags::TOP_OF_PIPE])
+                            .wait_dst_stage_mask(&stages)
                             .wait_semaphores(&wait_semaphores)
                             .command_buffers(&[cmd_buffer.handle()])
                             .signal_semaphores(&signal_semaphores)],
-                        vk::Fence::null(),
+                        fence.handle(),
                     )
                     .unwrap();
             }
@@ -186,14 +206,18 @@ impl StarlightQueue {
                 .export_fd(ExternalSemaphoreHandleType::SyncFd)
                 .unwrap()
         };
-        task_timeline.import_sync_file_point(task_fd, 1).unwrap();
+        task_timeline.import_sync_file_point(task_fd, 10).unwrap();
 
         let reads = command_buffer.used_reads;
         let writes = command_buffer.used_writes;
         let objs = command_buffer.used_objects;
         tracing::debug!("submit done");
         tokio::spawn(async move {
-            task_timeline.wait_async(1).unwrap().await;
+            task_timeline.wait_async(10).unwrap().await;
+            if !fence.is_signaled().unwrap() {
+                tracing::error!("timeline wait returned but fence is not signaled");
+            }
+            tracing::debug!("submit finished");
             drop(task_semaphore);
             drop(wait_semaphores);
             drop(write_semaphores);

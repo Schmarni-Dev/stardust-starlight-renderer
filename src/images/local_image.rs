@@ -1,5 +1,6 @@
 use std::sync::{
-    Arc, atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
@@ -116,7 +117,7 @@ impl LocalImage {
             acquire,
             release,
             image_view: self.image_view.clone(),
-            seen: self.seen.clone()
+            seen: self.seen.clone(),
         })
     }
     pub async fn new_read_op(
@@ -213,6 +214,10 @@ impl LocalImageWriteOp {
             .clone()
             .unwrap_or_else(|| ctx.gfx_queue.clone());
         let mut cmds = StarlightCommandBuffer::new(ctx, queue.queue_family_index()).unwrap();
+        cmds.set_debug_label(Some(
+            "LocalImageWriteOp::upload_tmp_staged Buffer To Image Copy",
+        ))
+        .unwrap();
         cmds.buffer_to_image_copy(buf_read, self);
         queue.submit(cmds, vec![], vec![]).await;
     }

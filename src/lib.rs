@@ -238,8 +238,14 @@ impl Context {
         // TODO: return error instead here too
         let drm_render_node = DrmRenderNode::new(render_minor.cast_unsigned()).unwrap();
         let gfx_queue = StarlightQueue::new(gfx_queue, drm_render_node.clone());
+        gfx_queue
+            .set_debug_label(Some("Main Graphics Queue"))
+            .unwrap();
         let transfer_queue =
             transfer_queue.map(|q| StarlightQueue::new(q, drm_render_node.clone()));
+        if let Some(q) = transfer_queue.as_ref() {
+            q.set_debug_label(Some("Transfer Queue")).unwrap();
+        }
         Self {
             alloc: Arc::new(StandardMemoryAllocator::new_default(device.clone())),
             cmd_buf_alloc: Arc::new(StandardCommandBufferAllocator::new(

@@ -343,6 +343,24 @@ impl RenderInstance {
                 .unwrap();
             self.fullscreen_pass.record(&self.render_ctx, cmds.inner());
             cmds.inner().end_rendering().unwrap();
+            cmds.inner()
+                .pipeline_barrier(&DependencyInfo {
+                    dependency_flags: DependencyFlags::BY_REGION,
+                    image_memory_barriers: [ImageMemoryBarrier {
+                        src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                        src_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        dst_stages: PipelineStages::empty(),
+                        dst_access: AccessFlags::empty(),
+                        old_layout: ImageLayout::ColorAttachmentOptimal,
+                        new_layout: color_target.target_layout(),
+                        subresource_range: color_target.image().subresource_range(),
+                        ..ImageMemoryBarrier::image(color_target.image().clone())
+                    }]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .unwrap();
         }
         cmds.used_writes.push(color_target);
         cmds

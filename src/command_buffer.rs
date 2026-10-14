@@ -8,6 +8,7 @@ use vulkano::{
         DrawIndexedIndirectCommand, RecordingCommandBuffer,
     },
     descriptor_set::{DescriptorSet, sys::RawDescriptorSet},
+    device::DeviceOwnedVulkanObject,
     image::ImageLayout,
     pipeline::{PipelineBindPoint, PipelineLayout},
     sync::{AccessFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages},
@@ -41,6 +42,9 @@ impl StarlightCommandBuffer {
             used_writes: Vec::new(),
             used_objects: Vec::new(),
         })
+    }
+    pub fn set_debug_label(&self, name: Option<&str>) -> Result<(), VulkanError> {
+        self.inner.set_debug_utils_object_name(name)
     }
     pub fn inner(&mut self) -> &mut RecordingCommandBuffer {
         &mut self.inner

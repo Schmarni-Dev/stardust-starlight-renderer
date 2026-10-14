@@ -8,10 +8,11 @@ use std::{
 
 use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
 use vulkano::{
-    device::DeviceOwned as _,
+    device::DeviceOwnedVulkanObject,
     image::{Image, ImageLayout, view::ImageView},
     sync::semaphore::{
-        ExternalSemaphoreHandleType, ImportSemaphoreFdInfo, Semaphore, SemaphoreImportFlags,
+        ExternalSemaphoreHandleType, ImportSemaphoreFdInfo, Semaphore, SemaphoreCreateInfo,
+        SemaphoreImportFlags,
     },
 };
 
@@ -27,18 +28,26 @@ pub struct WsiSwapchainImage {
     image: Arc<Image>,
     image_view: Arc<ImageView>,
     next_acquire: Arc<AtomicU64>,
+    last_write_done_semaphore: Arc<Semaphore>,
     seen: Arc<AtomicBool>,
 }
 impl WsiSwapchainImage {
     pub fn new(ctx: &Context, image: Arc<Image>) -> Self {
         let timeline = Arc::new(TimelineSyncObj::new(&ctx.drm_render_node).unwrap());
         unsafe { timeline.signal(1).unwrap() };
+        let semaphore =
+            Arc::new(Semaphore::new(ctx.device.clone(), SemaphoreCreateInfo::default()).unwrap());
+        semaphore
+            .set_debug_utils_object_name(Some("Wsi image render completion"))
+            .unwrap();
+
         Self {
             timeline,
             image_view: ImageView::new_default(image.clone()).unwrap(),
             image,
             next_acquire: Arc::new(AtomicU64::new(1)),
             seen: AtomicBool::new(false).into(),
+            last_write_done_semaphore: semaphore,
         }
     }
     pub fn image(&self) -> &Arc<Image> {
@@ -65,9 +74,8 @@ impl WsiSwapchainImage {
             .export_sync_file_point(self.next_acquire.load(Ordering::Relaxed))
             .inspect_err(|err| tracing::error!("failed to get sync file: {err}"))
             .ok()?;
-        let semaphore = Semaphore::from_pool(self.image.device().clone()).unwrap();
         unsafe {
-            semaphore
+            self.last_write_done_semaphore
                 .import_fd(ImportSemaphoreFdInfo {
                     flags: SemaphoreImportFlags::TEMPORARY,
                     file: Some(File::from(sync_file)),
@@ -76,7 +84,7 @@ impl WsiSwapchainImage {
                 // TODO: don't unwrap here :3
                 .unwrap();
         }
-        Some(semaphore.into())
+        Some(self.last_write_done_semaphore.clone())
     }
 }
 pub struct WsiSwapchainImageWriteOp {

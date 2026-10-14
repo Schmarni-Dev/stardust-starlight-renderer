@@ -3,7 +3,15 @@ use std::{sync::Arc, time::Instant};
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, uvec2, vec3};
 use rand::random_range;
 use stardust_vulkan::{
-    ApplicationInfo, Context, command_buffer::StarlightCommandBuffer, images::{ImageManager, local_image::LocalImage, wsi_swapchain::WsiSwapchainImage}, materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager}, mesh_manager::{MeshManager, VertexData}, object_manager::{Object, ObjectManager, RenderInvocationData}, queue::SyncPoint, render::{RenderInstance, SubPass, ViewData}, subpasses::simple_opaque::SimpleOpaque,
+    ApplicationInfo, Context,
+    command_buffer::StarlightCommandBuffer,
+    images::{ImageManager, local_image::LocalImage, wsi_swapchain::WsiSwapchainImage},
+    materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager},
+    mesh_manager::{MeshManager, VertexData},
+    object_manager::{Object, ObjectManager, RenderInvocationData},
+    queue::SyncPoint,
+    render::{RenderInstance, SubPass, ViewData},
+    subpasses::simple_opaque::SimpleOpaque,
 };
 use tokio::{runtime::Handle, task::block_in_place};
 use tracing::{info, level_filters::LevelFilter};
@@ -317,7 +325,6 @@ impl ApplicationHandler for App {
                 state: _,
                 button: _,
             } => {}
-            #[rustfmt::skip]
             WindowEvent::RedrawRequested => block_please(async {
                 let Some(window_data) = self.window_data.as_mut() else {
                     return;
@@ -435,6 +442,8 @@ impl ApplicationHandler for App {
                 let cmds =
                     StarlightCommandBuffer::new(&self.ctx, self.ctx.gfx_queue.queue_family_index())
                         .unwrap();
+                cmds.set_debug_label(Some("Main Render Command Buffer"))
+                    .unwrap();
                 let cmds = window_data.render_instance.render(
                     target_image.write_op(),
                     |ctx, mut cmds| {
@@ -448,14 +457,22 @@ impl ApplicationHandler for App {
                     },
                     cmds,
                 );
-                self.ctx.gfx_queue.submit(cmds, vec![SyncPoint::BinarySemaphore { semaphore: acquire_semaphore }], vec![]).await;
-                let v = 
-                                target_image.get_completion_semaphore();
+                self.ctx
+                    .gfx_queue
+                    .submit(
+                        cmds,
+                        vec![SyncPoint::BinarySemaphore {
+                            semaphore: acquire_semaphore,
+                        }],
+                        vec![],
+                    )
+                    .await;
+                let completion_sema = target_image.get_completion_semaphore().unwrap();
                 self.ctx.gfx_queue.with(|mut queue| unsafe {
                     queue
                         .present(&PresentInfo {
                             wait_semaphores: vec![SemaphorePresentInfo::new(
-                                target_image.get_completion_semaphore().unwrap(),
+                                completion_sema.clone(),
                             )],
                             swapchain_infos: vec![SwapchainPresentInfo::swapchain_image_index(
                                 window_data.swapchain.clone(),
