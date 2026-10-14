@@ -47,6 +47,29 @@ impl StarlightQueue {
         additional_wait_points: Vec<SyncPoint>,
         additional_signal_points: Vec<SyncPoint>,
     ) {
+        let additional_signal_points = additional_signal_points
+            .into_iter()
+            .map(|v| match &v {
+                SyncPoint::TimelineSyncObj {
+                    timeline: _,
+                    point: _,
+                } => {
+                    let semaphore = Semaphore::new(
+                        self.inner.device().clone(),
+                        SemaphoreCreateInfo {
+                            export_handle_types: ExternalSemaphoreHandleTypes::SYNC_FD,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    (v, Arc::new(semaphore))
+                }
+                SyncPoint::BinarySemaphore { semaphore } => {
+                    let sema = semaphore.clone();
+                    (v, sema)
+                }
+            })
+            .collect::<Vec<_>>();
         command_buffer
             .used_reads
             .dedup_by(|v1, v2| Arc::ptr_eq(v1, v2));
@@ -60,6 +83,10 @@ impl StarlightQueue {
                     .iter()
                     .map(|v| (v.timeline(), v.acquire_point())),
             )
+            .chain(additional_wait_points.iter().filter_map(|v| match v {
+                SyncPoint::TimelineSyncObj { timeline, point } => Some((timeline.as_ref(), *point)),
+                SyncPoint::BinarySemaphore { semaphore: _ } => None,
+            }))
             .collect::<Vec<_>>();
         let objs = acquires.iter().map(|v| v.0).collect::<Vec<_>>();
         // TODO: bubble error up? don't unwrap
@@ -158,17 +185,21 @@ impl StarlightQueue {
             let signal_semaphores = write_semaphores
                 .iter()
                 .chain([&task_semaphore])
-                .chain(additional_signal_points.iter().map(|v| {
-                    let SyncPoint::BinarySemaphore { semaphore } = v;
-                    semaphore.as_ref()
-                }))
+                .chain(
+                    additional_signal_points
+                        .iter()
+                        .map(|(_, sema)| sema.as_ref()),
+                )
                 .map(|v| v.handle())
                 .collect::<Vec<_>>();
             let wait_semaphores = wait_semaphores
                 .iter()
-                .chain(additional_wait_points.iter().map(|v| {
-                    let SyncPoint::BinarySemaphore { semaphore } = v;
-                    semaphore.as_ref()
+                .chain(additional_wait_points.iter().filter_map(|v| {
+                    if let SyncPoint::BinarySemaphore { semaphore } = v {
+                        Some(semaphore.as_ref())
+                    } else {
+                        None
+                    }
                 }))
                 .map(|v| v.handle())
                 .collect::<Vec<_>>();
@@ -199,6 +230,17 @@ impl StarlightQueue {
             op.timeline()
                 .import_sync_file_point(fd, op.release_point())
                 .unwrap();
+        }
+        for (point, sema) in additional_signal_points.iter() {
+            match point {
+                SyncPoint::TimelineSyncObj { timeline, point } => {
+                    // TODO: stop unwrapping everywhere
+                    let fd =
+                        unsafe { sema.export_fd(ExternalSemaphoreHandleType::SyncFd).unwrap() };
+                    timeline.import_sync_file_point(fd, *point).unwrap();
+                }
+                SyncPoint::BinarySemaphore { semaphore: _ } => {}
+            }
         }
         let task_timeline = TimelineSyncObj::new(&self.drm_render_node).unwrap();
         let task_fd = unsafe {
@@ -232,9 +274,11 @@ impl StarlightQueue {
 }
 
 pub enum SyncPoint {
-    // TimelineSyncObj {
-    //     timeline: Arc<TimelineSyncObj>,
-    //     point: u64,
-    // },
-    BinarySemaphore { semaphore: Arc<Semaphore> },
+    TimelineSyncObj {
+        timeline: Arc<TimelineSyncObj>,
+        point: u64,
+    },
+    BinarySemaphore {
+        semaphore: Arc<Semaphore>,
+    },
 }
