@@ -3,19 +3,18 @@ use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use glam::Mat4;
 use vulkano::{
     DeviceAddress, Validated,
-    buffer::{
-        AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, IndexBuffer,
-        Subbuffer,
-    },
-    command_buffer::{DrawIndexedIndirectCommand, RecordingCommandBuffer},
+    buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage},
+    command_buffer::DrawIndexedIndirectCommand,
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
 };
 
 use crate::{
     Context,
+    command_buffer::{StarlightCommandBuffer, StarlightIndexBuffer},
     materials::MaterialHandle,
     mesh_manager::{Mesh, MeshManager},
     resource_manager::{ResourceHandle, ResourceManager},
+    resources::buffer::{Bda, StarlightSubBuffer},
 };
 
 #[derive(BufferContents, Clone, Copy, Debug)]
@@ -25,8 +24,8 @@ struct ObjectMetadata {
     material: DeviceAddress,
     /// potentially null device pointer
     data: DeviceAddress,
-    /// pointer to global transform mat4, NonNull
-    global_transform: DeviceAddress,
+    /// Never None
+    global_transform: Option<Bda<'static, Mat4>>,
     /// [`ExtDataType`]
     data_type: u8,
 }
@@ -75,18 +74,24 @@ impl ObjectManager {
 }
 
 impl<M: MaterialHandle> Object<M> {
-    pub fn update_global_transform(&self, global_transform: Mat4) {
-        *self.transform.write().unwrap() = global_transform;
+    // TODO: add update_global_transforms to ObjectManager to make this not terrible
+    pub async fn update_global_transform(&self, global_transform: Mat4) {
+        self.transform
+            .new_wite_op()
+            .write(|mut v| *v = global_transform)
+            .await
+            .unwrap();
     }
 }
 
 // TODO: remove?
 pub struct RenderInvocationData<Material: MaterialHandle> {
-    metadata: Subbuffer<[ObjectMetadata]>,
-    indirect_buf: Subbuffer<[DrawIndexedIndirectCommand]>,
+    metadata: StarlightSubBuffer<[ObjectMetadata]>,
+    indirect_buf: StarlightSubBuffer<[DrawIndexedIndirectCommand]>,
+    indirect_obj_count: u32,
     mesh_manager: Arc<MeshManager>,
     // # Safety: this needs to keep the objects alive to make sure the device ptrs stay valid
-    _objects: Vec<Arc<Object<Material>>>,
+    objects: Vec<Arc<Object<Material>>>,
 }
 impl<Material: MaterialHandle> RenderInvocationData<Material> {
     pub fn new<'a>(
@@ -143,7 +148,11 @@ impl<Material: MaterialHandle> RenderInvocationData<Material> {
                     material: unsafe { obj.material.get_device_ptr() },
                     // no extra data implemented yet
                     data: 0,
-                    global_transform: obj.transform.device_address().unwrap().get(),
+                    // TODO: verify this safety comment, i'm tired
+                    // # Safety: this is fine because we hold a handle to the object, i think
+                    global_transform: Some(unsafe {
+                        obj.transform.device_address().unwrap().to_static()
+                    }),
                     // no extra data implemented yet
                     data_type: ExtDataType::None as u8,
                 };
@@ -159,37 +168,50 @@ impl<Material: MaterialHandle> RenderInvocationData<Material> {
         }
         drop(indirect_writer);
         drop(meta_writer);
+        let indirect_obj_count = indirect_buf.len() as u32;
+        // its fine to do this here since both buffers are constructed here
+        let metadata_buf = StarlightSubBuffer::from_subbuffer(ctx, metadata_buf);
+        let indirect_buf = StarlightSubBuffer::from_subbuffer(ctx, indirect_buf);
 
         Ok(Self {
             metadata: metadata_buf,
+            indirect_obj_count,
             indirect_buf,
             // TODO: make sure all meshes come from the same manager and handle empty objects vec
             mesh_manager: objects[0].mesh.manager.clone(),
-            _objects: objects,
+            objects,
         })
     }
-    pub async fn bind_buffers(&self, cmds: &mut RecordingCommandBuffer) {
+    pub async fn bind_buffers(&self, cmds: &mut StarlightCommandBuffer) {
+        let vbuf = self.mesh_manager.vertex_buffer.read().await;
+        let ibuf = self.mesh_manager.index_buffer.read().await;
+        cmds.used_reads
+            .extend(self.objects.iter().flat_map(|v| v.material.get_read_ops()));
+
+        // TODO: make sure that this vertex buffer isn't dropped until the gpu work is done,
+        // this could happen if the vertex buffer has to grow
+        cmds.bind_vertex_buffers(0, &[vbuf.new_read_op()]).unwrap();
+        // TODO: also make sure this survives, same as with the vertex buffer
+        cmds.bind_index_buffer(&StarlightIndexBuffer::U32(ibuf.new_read_op()))
+            .unwrap();
+    }
+    pub fn metadata_bda(&self, cmds: &mut StarlightCommandBuffer) -> DeviceAddress {
+        cmds.used_reads.push(self.metadata.new_read_op());
         unsafe {
-            let vbuf = self.mesh_manager.vertex_buffer.read().await;
-            let ibuf = self.mesh_manager.index_buffer.read().await;
-            // TODO: make sure that this vertex buffer isn't dropped until the gpu work is done,
-            // this could happen if the vertex buffer has to grow
-            cmds.bind_vertex_buffers(0, &[vbuf.clone().into_bytes()])
-                .unwrap();
-            // TODO: also make sure this survives, same as with the vertex buffer
-            cmds.bind_index_buffer(&IndexBuffer::U32(ibuf.clone()))
-                .unwrap();
+            self.metadata
+                .device_address()
+                .unwrap()
+                .to_static()
+                .as_raw()
+                .get()
         }
     }
-    pub fn metadata_bda(&self) -> DeviceAddress {
-        self.metadata.device_address().unwrap().get()
-    }
-    pub fn draw(&self, cmds: &mut RecordingCommandBuffer) {
+    pub fn draw(&self, cmds: &mut StarlightCommandBuffer) {
         unsafe {
             // TODO: make sure the buffer lives until the gpu work finishes
             cmds.draw_indexed_indirect(
-                &self.indirect_buf,
-                self.indirect_buf.len() as u32,
+                &(self.indirect_buf.new_read_op() as _),
+                self.indirect_obj_count,
                 size_of::<DrawIndexedIndirectCommand>() as u32,
             )
             .unwrap();

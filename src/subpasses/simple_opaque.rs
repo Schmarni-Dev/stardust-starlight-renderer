@@ -1,12 +1,13 @@
 use std::{collections::HashSet, sync::Arc};
 
 use vulkano::{
-    command_buffer::RecordingCommandBuffer,
     device::DeviceOwnedVulkanObject,
     format::Format,
     image::SampleCount,
     pipeline::{
-        DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineCreateFlags, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{
+        DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineCreateFlags, PipelineLayout,
+        PipelineShaderStageCreateInfo,
+        graphics::{
             GraphicsPipelineCreateInfo,
             color_blend::{
                 AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
@@ -19,13 +20,20 @@ use vulkano::{
             subpass::{PipelineRenderingCreateInfo, PipelineSubpassType},
             vertex_input::{Vertex as _, VertexDefinition as _},
             viewport::ViewportState,
-        }, layout::PipelineDescriptorSetLayoutCreateInfo
+        },
+        layout::PipelineDescriptorSetLayoutCreateInfo,
     },
     shader::ShaderStages,
 };
 
 use crate::{
-    Context, images::ImageManager, materials::{image_common, simple_pbr::PbrMaterial}, mesh_manager::VertexData, object_manager::RenderInvocationData, render::{RenderContext, SubPass, ViewData}
+    Context,
+    command_buffer::StarlightCommandBuffer,
+    images::ImageManager,
+    materials::{image_common, simple_pbr::PbrMaterial},
+    mesh_manager::VertexData,
+    object_manager::RenderInvocationData,
+    render::{RenderContext, SubPass, ViewData},
 };
 
 pub struct SimpleOpaque {
@@ -38,22 +46,27 @@ impl SubPass<PbrMaterial> for SimpleOpaque {
         data: &RenderInvocationData<PbrMaterial>,
         images: &ImageManager,
         ctx: &RenderContext,
-        cmds: &mut RecordingCommandBuffer,
+        cmds: &mut StarlightCommandBuffer,
     ) {
-        unsafe { cmds.bind_pipeline_graphics(&self.pipeline) }.unwrap();
-        images.bind(cmds, PipelineBindPoint::Graphics, &self.pipeline_layout).unwrap();
+        // TODO: have a graphics pipeline ReadOp
+        unsafe { cmds.inner().bind_pipeline_graphics(&self.pipeline) }.unwrap();
+        images
+            .bind(cmds, PipelineBindPoint::Graphics, &self.pipeline_layout)
+            .unwrap();
 
         tokio::runtime::Handle::current().block_on(data.bind_buffers(cmds));
+        let metadata_ptr = data.metadata_bda(cmds);
         unsafe {
-            cmds.push_constants(
-                &self.pipeline_layout,
-                0,
-                &crate::pipeline_pieces::mesh_vertex_shader::__pc {
-                    cam_ptr: ctx.views_bda,
-                    metadata_ptr: data.metadata_bda(),
-                },
-            )
-            .unwrap();
+            cmds.inner()
+                .push_constants(
+                    &self.pipeline_layout,
+                    0,
+                    &crate::pipeline_pieces::mesh_vertex_shader::__pc {
+                        cam_ptr: ctx.views_bda,
+                        metadata_ptr,
+                    },
+                )
+                .unwrap();
         }
         data.draw(cmds);
     }
@@ -61,7 +74,12 @@ impl SubPass<PbrMaterial> for SimpleOpaque {
 
 impl SimpleOpaque {
     // TODO: error handling
-    pub fn new(ctx: &Context, opaque_format: Format, depth_format: Format,views: &[ViewData]) -> Self {
+    pub fn new(
+        ctx: &Context,
+        opaque_format: Format,
+        depth_format: Format,
+        views: &[ViewData],
+    ) -> Self {
         let mut view_mask = 0;
         for i in 0..views.len() {
             view_mask |= 1 << i;

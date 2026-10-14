@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use glam::{Mat4, UVec2, UVec3};
 use tokio::runtime::RuntimeFlavor;
@@ -9,10 +9,7 @@ use vulkano::{
         RecordingCommandBuffer, RenderingAttachmentInfo, RenderingInfo, SubpassContents,
     },
     format::{ClearValue, Format},
-    image::{
-        Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, SampleCount,
-        view::{ImageView, ImageViewCreateInfo},
-    },
+    image::{Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, SampleCount},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::graphics::viewport::{Scissor, Viewport},
     render_pass::AttachmentLoadOp,
@@ -21,9 +18,11 @@ use vulkano::{
 
 use crate::{
     Context,
+    command_buffer::StarlightCommandBuffer,
     images::{ImageManager, transient_attachment::TransientAttachment},
     materials::MaterialHandle,
     object_manager::RenderInvocationData,
+    resources::image::ImageWriteOp,
     subpasses::fullscreen_resolve::FullscreenResolve,
 };
 
@@ -33,7 +32,7 @@ pub trait SubPass<Material: MaterialHandle> {
         data: &RenderInvocationData<Material>,
         images: &ImageManager,
         ctx: &RenderContext,
-        cmd: &mut RecordingCommandBuffer,
+        cmds: &mut StarlightCommandBuffer,
     );
 }
 pub struct RenderContext {
@@ -203,10 +202,10 @@ impl RenderInstance {
     }
     pub fn render(
         &mut self,
-        color_target: Texture,
-        render_callback: impl FnMut(&RenderContext, RecordingCommandBuffer) -> RecordingCommandBuffer,
-        cmds: RecordingCommandBuffer,
-    ) -> (RecordingCommandBuffer, Box<dyn Any>) {
+        color_target: Box<dyn ImageWriteOp>,
+        render_callback: impl FnMut(&RenderContext, StarlightCommandBuffer) -> StarlightCommandBuffer,
+        cmds: StarlightCommandBuffer,
+    ) -> StarlightCommandBuffer {
         // self.render_inner(ctx, color_target, render_callback, cmds)
         if let Ok(rt) = tokio::runtime::Handle::try_current()
             && rt.runtime_flavor() == RuntimeFlavor::CurrentThread
@@ -218,22 +217,13 @@ impl RenderInstance {
     }
     fn render_inner(
         &mut self,
-        color_target: Texture,
+        color_target: Box<dyn ImageWriteOp>,
         mut render_callback: impl FnMut(
             &RenderContext,
-            RecordingCommandBuffer,
-        ) -> RecordingCommandBuffer,
-        mut cmds: RecordingCommandBuffer,
-    ) -> (RecordingCommandBuffer, Box<dyn Any>) {
-        let color_target_image = match &color_target {
-            Texture::Image(image) => image,
-            Texture::Dmatex(image) => image,
-        };
-        let color_target_view = ImageView::new(
-            color_target_image.clone(),
-            ImageViewCreateInfo::from_image(&color_target_image),
-        )
-        .unwrap();
+            StarlightCommandBuffer,
+        ) -> StarlightCommandBuffer,
+        mut cmds: StarlightCommandBuffer,
+    ) -> StarlightCommandBuffer {
         unsafe {
             let RenderContext {
                 opaque,
@@ -243,128 +233,118 @@ impl RenderInstance {
                 previous_wboit_revealage: _,
                 views_bda: _,
             } = &self.render_ctx;
-            cmds.pipeline_barrier(&DependencyInfo {
-                dependency_flags: DependencyFlags::BY_REGION,
-                image_memory_barriers: [
-                    opaque.setup_barrier(
-                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    ),
-                    wboit.setup_barrier(
-                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    ),
-                    wboit_revealage.setup_barrier(
-                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    ),
-                    depth.setup_barrier(
-                        PipelineStages::EARLY_FRAGMENT_TESTS | PipelineStages::LATE_FRAGMENT_TESTS,
-                        AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                    ),
-                    ImageMemoryBarrier {
-                        src_stages: PipelineStages::empty(),
-                        src_access: AccessFlags::empty(),
-                        dst_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        dst_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        // TODO: don't assume this
-                        old_layout: ImageLayout::Undefined,
-                        new_layout: ImageLayout::ColorAttachmentOptimal,
-                        subresource_range: color_target_image.subresource_range(),
-                        ..ImageMemoryBarrier::image(color_target_image.clone())
-                    },
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            })
-            .unwrap()
-            .begin_rendering(&RenderingInfo {
-                layer_count: 1,
-                // TODO: handle multiview
-                view_mask: self.multiview_mask,
-                color_attachments: vec![
-                    Some(RenderingAttachmentInfo {
+            cmds.inner()
+                .pipeline_barrier(&DependencyInfo {
+                    dependency_flags: DependencyFlags::BY_REGION,
+                    image_memory_barriers: [
+                        opaque.setup_barrier(
+                            PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ),
+                        wboit.setup_barrier(
+                            PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ),
+                        wboit_revealage.setup_barrier(
+                            PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ),
+                        depth.setup_barrier(
+                            PipelineStages::EARLY_FRAGMENT_TESTS
+                                | PipelineStages::LATE_FRAGMENT_TESTS,
+                            AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        ),
+                        ImageMemoryBarrier {
+                            src_stages: PipelineStages::empty(),
+                            src_access: AccessFlags::empty(),
+                            dst_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            dst_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
+                            // TODO: don't assume this
+                            old_layout: color_target.current_layout(),
+                            new_layout: ImageLayout::ColorAttachmentOptimal,
+                            subresource_range: color_target.image().subresource_range(),
+                            ..ImageMemoryBarrier::image(color_target.image().clone())
+                        },
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .begin_rendering(&RenderingInfo {
+                    layer_count: 1,
+                    // TODO: handle multiview
+                    view_mask: self.multiview_mask,
+                    color_attachments: vec![
+                        Some(RenderingAttachmentInfo {
+                            load_op: AttachmentLoadOp::Clear,
+                            clear_value: Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+                            image_layout: ImageLayout::General,
+                            ..RenderingAttachmentInfo::image_view(opaque.image_view())
+                        }),
+                        Some(RenderingAttachmentInfo {
+                            image_layout: ImageLayout::General,
+                            ..RenderingAttachmentInfo::image_view(wboit.image_view())
+                        }),
+                        Some(RenderingAttachmentInfo {
+                            image_layout: ImageLayout::General,
+                            ..RenderingAttachmentInfo::image_view(wboit_revealage.image_view())
+                        }),
+                        Some(RenderingAttachmentInfo {
+                            image_layout: ImageLayout::ColorAttachmentOptimal,
+                            ..RenderingAttachmentInfo::image_view(color_target.image_view().clone())
+                        }),
+                    ],
+                    depth_attachment: Some(RenderingAttachmentInfo {
                         load_op: AttachmentLoadOp::Clear,
-                        clear_value: Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+                        clear_value: Some(ClearValue::Depth(0.0)),
                         image_layout: ImageLayout::General,
-                        ..RenderingAttachmentInfo::image_view(opaque.image_view())
+                        ..RenderingAttachmentInfo::image_view(depth.image_view())
                     }),
-                    Some(RenderingAttachmentInfo {
-                        image_layout: ImageLayout::General,
-                        ..RenderingAttachmentInfo::image_view(wboit.image_view())
-                    }),
-                    Some(RenderingAttachmentInfo {
-                        image_layout: ImageLayout::General,
-                        ..RenderingAttachmentInfo::image_view(wboit_revealage.image_view())
-                    }),
-                    Some(RenderingAttachmentInfo {
-                        image_layout: ImageLayout::ColorAttachmentOptimal,
-                        ..RenderingAttachmentInfo::image_view(color_target_view.clone())
-                    }),
-                ],
-                depth_attachment: Some(RenderingAttachmentInfo {
-                    load_op: AttachmentLoadOp::Clear,
-                    clear_value: Some(ClearValue::Depth(0.0)),
-                    image_layout: ImageLayout::General,
-                    ..RenderingAttachmentInfo::image_view(depth.image_view())
-                }),
-                // TODO: stencil attachment
-                stencil_attachment: None,
-                contents: SubpassContents::Inline,
-                render_area_extent: [self.resolution.x, self.resolution.y],
-                ..Default::default()
-            })
-            .unwrap()
-            .set_viewport_with_count(&[Viewport {
-                offset: [0.0, color_target_image.extent()[1] as f32],
-                extent: [
-                    color_target_image.extent()[0] as f32,
-                    -(color_target_image.extent()[1] as f32),
-                ],
-                depth_range: 0.0..=1.0,
-            }])
-            .unwrap()
-            .set_scissor_with_count(&[Scissor::default()])
-            .unwrap();
+                    // TODO: stencil attachment
+                    stencil_attachment: None,
+                    contents: SubpassContents::Inline,
+                    render_area_extent: [self.resolution.x, self.resolution.y],
+                    ..Default::default()
+                })
+                .unwrap()
+                .set_viewport_with_count(&[Viewport {
+                    offset: [0.0, color_target.image().extent()[1] as f32],
+                    extent: [
+                        color_target.image().extent()[0] as f32,
+                        -(color_target.image().extent()[1] as f32),
+                    ],
+                    depth_range: 0.0..=1.0,
+                }])
+                .unwrap()
+                .set_scissor_with_count(&[Scissor::default()])
+                .unwrap();
         }
         let mut cmds = render_callback(&self.render_ctx, cmds);
+        // local read barrier
         unsafe {
-            cmds.pipeline_barrier(&DependencyInfo {
-                dependency_flags: DependencyFlags::BY_REGION,
-                image_memory_barriers: [
-                    self.render_ctx.opaque.local_read_barrier(
-                        PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                        AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    ),
-                    self.render_ctx.depth.local_read_barrier(
-                        PipelineStages::LATE_FRAGMENT_TESTS,
-                        AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            })
-            .unwrap();
-            self.fullscreen_pass.record(&self.render_ctx, &mut cmds);
-            cmds.end_rendering().unwrap();
+            cmds.inner()
+                .pipeline_barrier(&DependencyInfo {
+                    dependency_flags: DependencyFlags::BY_REGION,
+                    image_memory_barriers: [
+                        self.render_ctx.opaque.local_read_barrier(
+                            PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ),
+                        self.render_ctx.depth.local_read_barrier(
+                            PipelineStages::LATE_FRAGMENT_TESTS,
+                            AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .unwrap();
+            self.fullscreen_pass.record(&self.render_ctx, cmds.inner());
+            cmds.inner().end_rendering().unwrap();
         }
-        // unsafe {
-        //     cmds.copy_image(&CopyImageInfo::images(
-        //         render_ctx.opaque,
-        //         color_target_image.clone(),
-        //     ))
-        //     .unwrap();
-        // }
-        // TODO: properly handle WBOIT
-        // unsafe {
-        //     cmds.resolve_image(&ResolveImageInfo::images(
-        //         render_ctx.opaque,
-        //         color_target_image.clone(),
-        //     ))
-        //     .unwrap();
-        // }
-        (cmds, Box::new(()))
+        cmds.used_writes.push(color_target);
+        cmds
     }
 }

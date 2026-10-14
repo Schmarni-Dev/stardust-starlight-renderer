@@ -1,41 +1,28 @@
 use std::{sync::Arc, time::Instant};
 
-use ash::vk;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, uvec2, vec3};
 use rand::random_range;
 use stardust_vulkan::{
-    ApplicationInfo, Context,
-    images::{ImageManager, ImageRef, local_image::LocalImage},
-    materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager},
-    mesh_manager::{MeshManager, VertexData},
-    object_manager::{Object, ObjectManager, RenderInvocationData},
-    render::{RenderInstance, SubPass, Texture, ViewData},
-    subpasses::simple_opaque::SimpleOpaque,
+    ApplicationInfo, Context, command_buffer::StarlightCommandBuffer, images::{ImageManager, local_image::LocalImage, wsi_swapchain::WsiSwapchainImage}, materials::simple_pbr::{PbrData, PbrMaterial, PbrMaterialManager}, mesh_manager::{MeshManager, VertexData}, object_manager::{Object, ObjectManager, RenderInvocationData}, queue::SyncPoint, render::{RenderInstance, SubPass, ViewData}, subpasses::simple_opaque::SimpleOpaque,
 };
-use tracing::info;
+use tokio::{runtime::Handle, task::block_in_place};
+use tracing::{info, level_filters::LevelFilter};
+use tracing_subscriber::EnvFilter;
 use vulkano::{
-    Validated, Version, VulkanError, VulkanLibrary, VulkanObject,
-    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
-    command_buffer::{
-        CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsage, CopyBufferToImageInfo,
-        RecordingCommandBuffer,
-    },
+    Validated, Version, VulkanError, VulkanLibrary,
     device::{DeviceExtensions, DeviceFeatures, DeviceOwnedVulkanObject},
     format::Format,
     image::{
-        Image, ImageLayout, ImageUsage, SampleCount,
+        ImageUsage, SampleCount,
         sampler::{Sampler, SamplerCreateInfo},
     },
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
+    memory::allocator::MemoryTypeFilter,
     shader::ShaderStages,
     swapchain::{
         AcquireNextImageInfo, AcquiredImage, CompositeAlpha, PresentInfo, SemaphorePresentInfo,
         Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
     },
-    sync::{
-        AccessFlags, DependencyFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages,
-        fence::Fence, semaphore::Semaphore,
-    },
+    sync::semaphore::Semaphore,
 };
 use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop, window::Window,
@@ -43,6 +30,13 @@ use winit::{
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
     let entry = VulkanLibrary::new().unwrap();
 
     let event_loop = EventLoop::new().unwrap();
@@ -80,9 +74,23 @@ async fn main() {
         Some("Test Texture"),
         MemoryTypeFilter::PREFER_DEVICE,
     );
+    image
+        .new_write_op()
+        .upload_tmp_staged(
+            &ctx,
+            &[
+                [255, 0u8, 255, 255],
+                [0u8, 255, 0u8, 255],
+                [0u8, 255, 0u8, 255],
+                [255, 0u8, 255, 255],
+            ],
+        )
+        .await;
     let sampler = Sampler::new(ctx.device.clone(), SamplerCreateInfo::default()).unwrap();
     let sampler_ref = image_manager.alloc_sampler(sampler).await.unwrap();
-    let image_ref = image_manager.alloc(&ctx, &image, sampler_ref).await;
+    let image_ref = image
+        .new_read_op(&ctx, &mut image_manager, sampler_ref)
+        .await;
     let mesh = mesh_manager
         .alloc(
             &ctx,
@@ -170,12 +178,11 @@ async fn main() {
         obj_1,
         obj_2,
         obj_3,
-        image_setup: Some(image_ref),
         render_data,
         start_time: Instant::now(),
     };
-    println!("running app");
-    event_loop.run_app(&mut app).unwrap();
+
+    block_in_place(move || event_loop.run_app(&mut app).unwrap());
 }
 
 struct App {
@@ -190,8 +197,6 @@ struct App {
     obj_2: Arc<Object<PbrMaterial>>,
     obj_3: Arc<Object<PbrMaterial>>,
 
-    image_setup: Option<Arc<ImageRef>>,
-
     render_data: RenderInvocationData<PbrMaterial>,
     start_time: Instant,
 }
@@ -199,14 +204,18 @@ struct App {
 struct WindowData {
     window: Arc<Window>,
     swapchain: Arc<Swapchain>,
-    swap_images: Vec<Arc<Image>>,
+    swap_images: Vec<WsiSwapchainImage>,
     render_instance: RenderInstance,
     opaque: SimpleOpaque,
 }
 
+fn block_please(future: impl Future) {
+    block_in_place(|| Handle::current().block_on(future));
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        println!("creating window");
+        info!("creating window");
         let window = Arc::new(
             event_loop
                 .create_window(Window::default_attributes())
@@ -259,9 +268,19 @@ impl ApplicationHandler for App {
         self.window_data = Some(WindowData {
             window,
             swapchain,
-            swap_images: images,
+            swap_images: images
+                .into_iter()
+                .map(|v| WsiSwapchainImage::new(&self.ctx, v))
+                .collect(),
             render_instance,
-            opaque: SimpleOpaque::new(&self.ctx, image_format, Format::D32_SFLOAT),
+            opaque: SimpleOpaque::new(
+                &self.ctx,
+                image_format,
+                Format::D32_SFLOAT,
+                &[ViewData {
+                    world_to_clip: Mat4::IDENTITY,
+                }],
+            ),
         });
     }
 
@@ -298,7 +317,8 @@ impl ApplicationHandler for App {
                 state: _,
                 button: _,
             } => {}
-            WindowEvent::RedrawRequested => {
+            #[rustfmt::skip]
+            WindowEvent::RedrawRequested => block_please(async {
                 let Some(window_data) = self.window_data.as_mut() else {
                     return;
                 };
@@ -322,7 +342,10 @@ impl ApplicationHandler for App {
                         SampleCount::Sample1,
                     );
                     window_data.swapchain = swap;
-                    window_data.swap_images = images;
+                    window_data.swap_images = images
+                        .into_iter()
+                        .map(|v| WsiSwapchainImage::new(&self.ctx, v))
+                        .collect();
                 }
                 let acquire_semaphore =
                     Arc::new(Semaphore::from_pool(self.ctx.device.clone()).unwrap());
@@ -358,9 +381,15 @@ impl ApplicationHandler for App {
 
                 let target_image = window_data.swap_images[index as usize].clone();
                 target_image
+                    .image()
                     .set_debug_utils_object_name(Some(&format!("Target Image {index}")))
                     .unwrap();
-                let ratio = target_image.extent()[0] as f32 / target_image.extent()[1] as f32;
+                target_image
+                    .image_view()
+                    .set_debug_utils_object_name(Some(&format!("Target Image View {index}")))
+                    .unwrap();
+                let ratio = target_image.image().extent()[0] as f32
+                    / target_image.image().extent()[1] as f32;
 
                 // overwriting the vulkan clipspace to be +Y up, same as directx apparently
                 let proj_mat = glam::camera::rh::proj::directx::perspective_infinite_reverse(
@@ -374,19 +403,28 @@ impl ApplicationHandler for App {
                 let t = self.start_time.elapsed().as_secs_f32().sin();
                 let t2 = (self.start_time.elapsed().as_secs_f32() + 0.25).sin();
                 let t3 = (self.start_time.elapsed().as_secs_f32() * 1.5 + 0.60).cos();
-                self.obj_1.update_global_transform(
-                    Mat4::from_translation(vec3(t3 * 0.1, (t2 * 0.15) + 0.1, (t * -0.25) + -0.25))
-                        * Mat4::from_scale(Vec3::splat(0.001)),
-                );
-                self.obj_2.update_global_transform(
-                    Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
-                        * Mat4::from_scale(Vec3::splat(t * 0.002)),
-                );
-                self.obj_3.update_global_transform(
-                    Mat4::from_translation(vec3(0.15, 0.15, -0.251))
-                        * Mat4::from_scale(Vec3::splat(0.001))
-                        * Mat4::from_rotation_y(self.start_time.elapsed().as_secs_f32()),
-                );
+                self.obj_1
+                    .update_global_transform(
+                        Mat4::from_translation(vec3(
+                            t3 * 0.1,
+                            (t2 * 0.15) + 0.1,
+                            (t * -0.25) + -0.25,
+                        )) * Mat4::from_scale(Vec3::splat(0.001)),
+                    )
+                    .await;
+                self.obj_2
+                    .update_global_transform(
+                        Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
+                            * Mat4::from_scale(Vec3::splat(t * 0.002)),
+                    )
+                    .await;
+                self.obj_3
+                    .update_global_transform(
+                        Mat4::from_translation(vec3(0.15, 0.15, -0.251))
+                            * Mat4::from_scale(Vec3::splat(0.001))
+                            * Mat4::from_rotation_y(self.start_time.elapsed().as_secs_f32()),
+                    )
+                    .await;
                 // let camera_mat = proj_mat;
                 window_data.render_instance.update_view(
                     0,
@@ -394,80 +432,11 @@ impl ApplicationHandler for App {
                         world_to_clip: camera_mat,
                     },
                 );
-                let mut cmds = RecordingCommandBuffer::new(
-                    self.ctx.cmd_buf_alloc.clone(),
-                    self.ctx.gfx_queue.queue_family_index(),
-                    CommandBufferLevel::Primary,
-                    CommandBufferBeginInfo {
-                        usage: CommandBufferUsage::OneTimeSubmit,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-                let mut _buf = None;
-                if let Some(image) = self.image_setup.take() {
-                    let buf: Subbuffer<[[u8; 4]; 4]> = Buffer::new_sized(
-                        self.ctx.alloc.clone(),
-                        BufferCreateInfo {
-                            usage: BufferUsage::TRANSFER_SRC,
-                            ..Default::default()
-                        },
-                        AllocationCreateInfo {
-                            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap();
-                    *buf.write().unwrap() = [
-                        [255, 0, 255, 255],
-                        [0, 255, 0, 255],
-                        [0, 255, 0, 255],
-                        [255, 0, 255, 255],
-                    ];
-                    unsafe {
-                        cmds.pipeline_barrier(&DependencyInfo {
-                            image_memory_barriers: [ImageMemoryBarrier {
-                                src_stages: PipelineStages::empty(),
-                                src_access: AccessFlags::empty(),
-                                dst_stages: PipelineStages::COPY,
-                                dst_access: AccessFlags::TRANSFER_WRITE,
-                                old_layout: ImageLayout::Undefined,
-                                new_layout: ImageLayout::TransferDstOptimal,
-                                subresource_range: image.image().subresource_range(),
-                                ..ImageMemoryBarrier::image(image.image().clone())
-                            }]
-                            .into_iter()
-                            .collect(),
-                            ..Default::default()
-                        })
+                let cmds =
+                    StarlightCommandBuffer::new(&self.ctx, self.ctx.gfx_queue.queue_family_index())
                         .unwrap();
-                        cmds.copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(
-                            buf.clone(),
-                            image.image().clone(),
-                        ))
-                        .unwrap();
-                        cmds.pipeline_barrier(&DependencyInfo {
-                            image_memory_barriers: [ImageMemoryBarrier {
-                                src_stages: PipelineStages::COPY,
-                                src_access: AccessFlags::TRANSFER_WRITE,
-                                dst_stages: PipelineStages::FRAGMENT_SHADER,
-                                dst_access: AccessFlags::SHADER_SAMPLED_READ,
-                                old_layout: ImageLayout::TransferDstOptimal,
-                                new_layout: ImageLayout::ShaderReadOnlyOptimal,
-                                subresource_range: image.image().subresource_range(),
-                                ..ImageMemoryBarrier::image(image.image().clone())
-                            }]
-                            .into_iter()
-                            .collect(),
-                            ..Default::default()
-                        })
-                        .unwrap();
-                    }
-                    _buf = Some(buf);
-                }
-                let (mut cmds, handles) = window_data.render_instance.render(
-                    Texture::Image(target_image.clone()),
+                let cmds = window_data.render_instance.render(
+                    target_image.write_op(),
                     |ctx, mut cmds| {
                         window_data.opaque.record(
                             &self.render_data,
@@ -479,57 +448,15 @@ impl ApplicationHandler for App {
                     },
                     cmds,
                 );
-                unsafe {
-                    // TODO: do the reverse on acquire?
-                    cmds.pipeline_barrier(&DependencyInfo {
-                        dependency_flags: DependencyFlags::BY_REGION,
-                        image_memory_barriers: [ImageMemoryBarrier {
-                            src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                            src_access: AccessFlags::MEMORY_WRITE,
-                            dst_stages: PipelineStages::BOTTOM_OF_PIPE,
-                            dst_access: AccessFlags::empty(),
-                            old_layout: ImageLayout::ColorAttachmentOptimal,
-                            new_layout: ImageLayout::PresentSrc,
-                            subresource_range: target_image.subresource_range(),
-                            ..ImageMemoryBarrier::image(target_image)
-                        }]
-                        .into_iter()
-                        .collect(),
-                        ..Default::default()
-                    })
-                    .unwrap();
-                };
-                let command_buffer = unsafe { Arc::new(cmds.end().unwrap()) };
-                let render_complete_sema =
-                    Arc::new(Semaphore::from_pool(self.ctx.device.clone()).unwrap());
-                let render_complete_fence = Fence::from_pool(self.ctx.device.clone()).unwrap();
-                self.ctx.gfx_queue.with(|_queue| unsafe {
-                    let queue = self.ctx.gfx_queue.handle();
-                    let fns = self.ctx.device.fns();
-                    let ash_dev = ash::Device::from_parts_1_3(
-                        self.ctx.device.handle(),
-                        fns.v1_0.clone(),
-                        fns.v1_1.clone(),
-                        fns.v1_2.clone(),
-                        fns.v1_3.clone(),
-                    );
-                    ash_dev
-                        .queue_submit(
-                            queue,
-                            &[vk::SubmitInfo::default()
-                                .wait_semaphores(&[acquire_semaphore.handle()])
-                                .command_buffers(&[command_buffer.handle()])
-                                .signal_semaphores(&[render_complete_sema.handle()])
-                                // does resolve count as TRANSFER?
-                                .wait_dst_stage_mask(&[vk::PipelineStageFlags::TRANSFER])],
-                            render_complete_fence.handle(),
-                        )
-                        .unwrap();
-                });
+                self.ctx.gfx_queue.submit(cmds, vec![SyncPoint::BinarySemaphore { semaphore: acquire_semaphore }], vec![]).await;
+                let v = 
+                                target_image.get_completion_semaphore();
                 self.ctx.gfx_queue.with(|mut queue| unsafe {
                     queue
                         .present(&PresentInfo {
-                            wait_semaphores: vec![SemaphorePresentInfo::new(render_complete_sema)],
+                            wait_semaphores: vec![SemaphorePresentInfo::new(
+                                target_image.get_completion_semaphore().unwrap(),
+                            )],
                             swapchain_infos: vec![SwapchainPresentInfo::swapchain_image_index(
                                 window_data.swapchain.clone(),
                                 index,
@@ -541,10 +468,7 @@ impl ApplicationHandler for App {
                             v.unwrap();
                         });
                 });
-                render_complete_fence.wait(None).unwrap();
-                drop(handles);
-                drop(_buf);
-            }
+            }),
             _ => {}
         }
     }

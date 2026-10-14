@@ -13,41 +13,41 @@ use vulkano::{
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
 };
 
-use crate::Context;
+use crate::{Context, resources::buffer::StarlightSubBuffer};
 
 // TODO: impl trim at some point
 #[derive(Debug)]
-pub struct ResourceManager<T: BufferContents + Send> {
+pub struct ResourceManager<T: BufferContents + Send + Copy> {
     buffer_size: u64,
     buffers: RwLock<Vec<Subbuffer<[T]>>>,
     allocator: Mutex<Allocator>,
 }
 
-pub struct ResourceHandle<T: BufferContents + Send> {
-    buffer: Subbuffer<T>,
+pub struct ResourceHandle<T: BufferContents + Send + Copy> {
+    buffer: StarlightSubBuffer<T>,
     manager: Arc<ResourceManager<T>>,
     alloc: Allocation,
 }
 
-impl<T: BufferContents + Send + std::fmt::Debug> std::fmt::Debug for ResourceHandle<T> {
+impl<T: BufferContents + Send + std::fmt::Debug + Copy> std::fmt::Debug for ResourceHandle<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResourceHandle").finish()
     }
 }
 
-impl<T: BufferContents + Send> Deref for ResourceHandle<T> {
-    type Target = Subbuffer<T>;
+impl<T: BufferContents + Send + Copy> Deref for ResourceHandle<T> {
+    type Target = StarlightSubBuffer<T>;
 
     fn deref(&self) -> &Self::Target {
         &self.buffer
     }
 }
-impl<T: BufferContents + Send> DerefMut for ResourceHandle<T> {
+impl<T: BufferContents + Send + Copy> DerefMut for ResourceHandle<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.buffer
     }
 }
-impl<T: BufferContents + Send> Drop for ResourceHandle<T> {
+impl<T: BufferContents + Send + Copy> Drop for ResourceHandle<T> {
     fn drop(&mut self) {
         let alloc = self.alloc;
         let manager = self.manager.clone();
@@ -56,13 +56,13 @@ impl<T: BufferContents + Send> Drop for ResourceHandle<T> {
         });
     }
 }
-impl<T: BufferContents + Send> ResourceHandle<T> {
+impl<T: BufferContents + Send + Copy> ResourceHandle<T> {
     pub fn alloc_index(&self) -> u32 {
         self.alloc.offset
     }
 }
 
-impl<T: BufferContents + Send> ResourceManager<T> {
+impl<T: BufferContents + Send + Copy> ResourceManager<T> {
     pub fn new(buffer_size: u64) -> Arc<Self> {
         Self {
             buffer_size,
@@ -123,7 +123,13 @@ impl<T: BufferContents + Send> ResourceManager<T> {
         let buffer = buffers_read[buffer_index as usize]
             .clone()
             .index(buffer_offset);
-        *buffer.write().unwrap() = data;
+        // TODO: make this easy to do with the starlight one
+        let buffer = StarlightSubBuffer::from_subbuffer(ctx, buffer);
+        buffer
+            .new_wite_op()
+            .write(move |mut v| *v = data)
+            .await
+            .unwrap();
         Ok(ResourceHandle {
             buffer,
             manager: self.clone(),

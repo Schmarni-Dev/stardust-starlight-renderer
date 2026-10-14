@@ -9,11 +9,13 @@ vulkano = { git = "https://github.com/Schmarni-Dev/vulkano", branch = "custom_ne
 
 [dependencies]
 ash = "0.38.0"
+bytemuck = { version = "1.25.2", features = [] }
 drm-fourcc = "2.2.0"
 glam = { version = "0.33.2", features = ["bytemuck", "mint"] }
 offset-allocator = "0.2.0"
 rustix = { version = "1.1.4", features = ["fs"] }
-timeline_syncobj = "0.2.0"
+# timeline_syncobj = "0.2.0"
+timeline_syncobj={git = "https://github.com/Schmarni-Dev/timeline_syncobj",features=["tokio"]}
 tokio = { version = "1.52.3", features = ["rt", "sync", "rt-multi-thread"] }
 tracing = "0.1.44"
 vulkano = { version = "0.35.2", default-features = false, features = [
@@ -33,3 +35,4 @@ winit = { version = "0.30.13", default-features = false, features = [
 	"x11",
 ] }
 mint = "0.5.9"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

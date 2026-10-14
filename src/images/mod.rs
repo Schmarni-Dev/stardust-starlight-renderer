@@ -1,11 +1,10 @@
-use std::{num::NonZero, sync::Arc};
+use std::sync::Arc;
 
 use glam::{UVec2, UVec3};
 use offset_allocator::{Allocation, Allocator};
 use tokio::sync::Mutex;
 use vulkano::{
     buffer::BufferContents,
-    command_buffer::RecordingCommandBuffer,
     descriptor_set::{DescriptorSet, WriteDescriptorSet, layout::DescriptorSetLayout},
     image::{
         Image, ImageType,
@@ -21,15 +20,19 @@ use vulkano::{
 
 use crate::{
     Context,
+    command_buffer::StarlightCommandBuffer,
     materials::image_common::get_descriptor_set_layout_info,
     resource_manager::{ResourceHandle, ResourceManager},
+    resources::buffer::Bda,
 };
 
 pub mod dma_image;
 pub mod local_image;
+pub mod openxr_attachment;
 pub mod transient_attachment;
+pub mod wsi_swapchain;
 
-#[derive(Debug, BufferContents)]
+#[derive(Debug, BufferContents, Clone, Copy)]
 #[repr(C)]
 pub struct ImageRefData {
     // TODO: add two more indices for ycbcr planes
@@ -215,7 +218,11 @@ impl ImageManager {
             )
             .await
             .unwrap();
-        alloc.write().unwrap().image_index = alloc.alloc_index();
+        alloc
+            .new_wite_op()
+            .write(|mut v| v.image_index = alloc.alloc_index())
+            .await
+            .unwrap();
         self.descriptor_set
             .update(
                 [WriteDescriptorSet::image_view_array(
@@ -227,8 +234,6 @@ impl ImageManager {
             )
             .unwrap();
         ImageRef {
-            image: image.get_image(),
-            view: image.get_image_view(),
             ref_data: alloc,
             sampler,
         }
@@ -237,12 +242,18 @@ impl ImageManager {
     // TODO: make sure that the descriptor set is not destroyed before the gpu finishes
     pub fn bind(
         &self,
-        cmds: &mut RecordingCommandBuffer,
+        cmds: &mut StarlightCommandBuffer,
         bind_point: PipelineBindPoint,
         layout: &PipelineLayout,
     ) -> Result<(), Box<vulkano::ValidationError>> {
         unsafe {
-            cmds.bind_descriptor_sets(bind_point, layout, 0, &[self.descriptor_set.as_raw()], &[])?;
+            cmds.inner().bind_descriptor_sets(
+                bind_point,
+                layout,
+                0,
+                &[self.descriptor_set.as_raw()],
+                &[],
+            )?;
         }
         Ok(())
     }
@@ -250,15 +261,10 @@ impl ImageManager {
 #[derive(Debug)]
 pub struct ImageRef {
     sampler: Arc<SamplerRef>,
-    image: Arc<Image>,
-    view: Arc<ImageView>,
     ref_data: ResourceHandle<ImageRefData>,
 }
 impl ImageRef {
-    pub fn bda(&self) -> NonZero<u64> {
+    pub fn bda<'a>(&'a self) -> Bda<'a, ImageRefData> {
         self.ref_data.device_address().unwrap()
-    }
-    pub fn image(&self) -> &Arc<Image> {
-        &self.image
     }
 }

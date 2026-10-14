@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use timeline_syncobj::render_node::DrmRenderNode;
 use vulkano::{
     Validated, Version, VulkanError, VulkanLibrary,
     command_buffer::allocator::{
@@ -17,14 +18,19 @@ use vulkano::{
     memory::allocator::StandardMemoryAllocator,
 };
 
+use crate::queue::StarlightQueue;
+
+pub mod command_buffer;
 pub mod dmatex;
 pub mod images;
 pub mod materials;
 pub mod mesh_manager;
 pub mod object_manager;
 pub mod pipeline_pieces;
+pub mod queue;
 pub mod render;
 pub mod resource_manager;
+pub mod resources;
 pub mod subpasses;
 pub mod vulkano_exts;
 
@@ -35,7 +41,9 @@ pub struct Context {
     pub alloc: Arc<StandardMemoryAllocator>,
     pub cmd_buf_alloc: Arc<StandardCommandBufferAllocator>,
     pub descriptor_set_alloc: Arc<StandardDescriptorSetAllocator>,
-    pub gfx_queue: Arc<Queue>,
+    pub gfx_queue: StarlightQueue,
+    pub transfer_queue: Option<StarlightQueue>,
+    pub drm_render_node: DrmRenderNode,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationInfo {
@@ -185,30 +193,53 @@ impl Context {
         .expect("failed to select phys dev");
         let info = phys_dev.queue_family_properties();
         let mut graphics_queue_family_index = None;
+        let mut transfer_queue_family_index = None;
         for (i, info) in info.into_iter().enumerate() {
             if graphics_queue_family_index.is_none()
                 && info.queue_flags.contains(QueueFlags::GRAPHICS)
             {
                 graphics_queue_family_index.replace(i);
-                if info.queue_count == 1 {
-                    continue;
-                }
+            }
+            if transfer_queue_family_index.is_none()
+                && info.queue_flags.contains(QueueFlags::TRANSFER)
+                && !info.queue_flags.contains(QueueFlags::GRAPHICS)
+            {
+                transfer_queue_family_index.replace(i);
             }
         }
         let gfx_queue_family = graphics_queue_family_index.expect("no graphics queue") as u32;
-        let device_create_info = DeviceCreateInfo {
-            queue_create_infos: vec![QueueCreateInfo {
+        let mut queue_create_infos = vec![QueueCreateInfo {
+            flags: QueueCreateFlags::empty(),
+            queue_family_index: gfx_queue_family,
+            queues: vec![1.0],
+            ..Default::default()
+        }];
+        if let Some(transfer_queue_family) = transfer_queue_family_index {
+            queue_create_infos.push(QueueCreateInfo {
                 flags: QueueCreateFlags::empty(),
-                queue_family_index: gfx_queue_family,
+                queue_family_index: transfer_queue_family as u32,
                 queues: vec![1.0],
                 ..Default::default()
-            }],
+            });
+        }
+        let device_create_info = DeviceCreateInfo {
+            queue_create_infos,
             enabled_extensions: required_device_extensions,
             enabled_features: required_device_features,
             ..Default::default()
         };
         let (device, mut queues) = device_create(&phys_dev, device_create_info).unwrap();
         let gfx_queue = queues.next().unwrap();
+        let transfer_queue = transfer_queue_family_index
+            .is_some()
+            .then(|| queues.next().unwrap());
+        // TODO: return error instead
+        let render_minor = phys_dev.properties().render_minor.unwrap();
+        // TODO: return error instead here too
+        let drm_render_node = DrmRenderNode::new(render_minor.cast_unsigned()).unwrap();
+        let gfx_queue = StarlightQueue::new(gfx_queue, drm_render_node.clone());
+        let transfer_queue =
+            transfer_queue.map(|q| StarlightQueue::new(q, drm_render_node.clone()));
         Self {
             alloc: Arc::new(StandardMemoryAllocator::new_default(device.clone())),
             cmd_buf_alloc: Arc::new(StandardCommandBufferAllocator::new(
@@ -226,6 +257,8 @@ impl Context {
             phys_dev,
             device,
             gfx_queue,
+            drm_render_node,
+            transfer_queue,
         }
     }
 }

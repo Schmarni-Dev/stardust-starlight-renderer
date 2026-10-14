@@ -8,12 +8,12 @@ use offset_allocator::{Allocation, Allocator};
 use tokio::sync::{Mutex, RwLock};
 use vulkano::{
     Validated,
-    buffer::{
-        AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
-    },
+    buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::graphics::vertex_input::Vertex,
 };
+
+use crate::resources::buffer::StarlightSubBuffer;
 
 #[derive(Vertex, BufferContents, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -39,8 +39,8 @@ pub struct SkinnedVertex {
 pub struct MeshManager {
     id: u32,
 
-    pub(crate) vertex_buffer: RwLock<Subbuffer<[VertexData]>>,
-    pub(crate) index_buffer: RwLock<Subbuffer<[u32]>>,
+    pub(crate) vertex_buffer: RwLock<StarlightSubBuffer<[VertexData]>>,
+    pub(crate) index_buffer: RwLock<StarlightSubBuffer<[u32]>>,
     allocs: Mutex<Allocs>,
     vertex_len: AtomicU64,
     index_len: AtomicU64,
@@ -76,8 +76,8 @@ impl MeshManager {
                 ..Default::default()
             },
             initial_len,
-        )?
-        .into();
+        )?;
+        let vertex_buffer = StarlightSubBuffer::from_subbuffer(ctx, vertex_buffer).into();
         let index_buffer = Buffer::new_slice(
             ctx.alloc.clone(),
             BufferCreateInfo {
@@ -90,8 +90,8 @@ impl MeshManager {
                 ..Default::default()
             },
             initial_len,
-        )?
-        .into();
+        )?;
+        let index_buffer = StarlightSubBuffer::from_subbuffer(ctx, index_buffer).into();
         Ok(Self {
             id: MESH_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             vertex_buffer,
@@ -141,17 +141,22 @@ impl MeshManager {
                     return Err(err);
                 }
             };
+            let vertex_buf = StarlightSubBuffer::from_subbuffer(ctx, vertex_buf);
             self.vertex_len.store(vertex_len * 2, Ordering::Relaxed);
-            let read_guard = self.vertex_buffer.read().await;
-            let reader = read_guard.read().unwrap();
-            let mut writer = vertex_buf.write().unwrap();
-            writer
-                .iter_mut()
-                .zip(reader.iter())
-                .for_each(|(v, v2)| *v = *v2);
+            let read_op = self.vertex_buffer.read().await.new_read_op();
+            let reader = read_op.read().await.unwrap();
+            vertex_buf
+                .new_wite_op()
+                .write(|mut writer| {
+                    writer[0..reader.len()].copy_from_slice(&reader);
+                    // .iter_mut()
+                    // .zip(reader.iter())
+                    // .for_each(|(v, v2)| *v = *v2);
+                })
+                .await
+                .unwrap();
             drop(reader);
-            drop(writer);
-            drop(read_guard);
+            drop(read_op);
             *self.vertex_buffer.write().await = vertex_buf;
         }
         let index_alloc = allocs.index.allocate(indecies.len() as u32).unwrap();
@@ -179,33 +184,51 @@ impl MeshManager {
                     return Err(err);
                 }
             };
+            let index_buf = StarlightSubBuffer::from_subbuffer(ctx, index_buf);
             self.index_len.store(index_len * 2, Ordering::Relaxed);
-            let read_guard = self.index_buffer.read().await;
-            let reader = read_guard.read().unwrap();
-            let mut writer = index_buf.write().unwrap();
-            writer
-                .iter_mut()
-                .zip(reader.iter())
-                .for_each(|(v, v2)| *v = *v2);
+            let read_op = self.index_buffer.read().await.new_read_op();
+            let reader = read_op.read().await.unwrap();
+            index_buf
+                .new_wite_op()
+                .write(|mut writer| {
+                    writer[0..reader.len()].copy_from_slice(&reader);
+                    // .iter_mut()
+                    // .zip(reader.iter())
+                    // .for_each(|(v, v2)| *v = *v2);
+                })
+                .await
+                .unwrap();
             drop(reader);
-            drop(read_guard);
-            drop(writer);
+            drop(read_op);
             *self.index_buffer.write().await = index_buf;
         }
 
         let vertex_offset = vertex_alloc.offset as usize;
-        self.vertex_buffer.read().await.write().unwrap()
-            [vertex_offset..(vertex_offset + vertex_buffer.len())]
-            .copy_from_slice(vertex_buffer);
-        debug_assert_eq!(
-            &self.vertex_buffer.read().await.read().unwrap()
-                [vertex_offset..(vertex_offset + vertex_buffer.len())],
-            vertex_buffer
-        );
+        self.vertex_buffer
+            .read()
+            .await
+            .new_wite_op()
+            .write(|mut v| {
+                v[vertex_offset..(vertex_offset + vertex_buffer.len())]
+                    .copy_from_slice(vertex_buffer)
+            })
+            .await
+            .unwrap();
+        // debug_assert_eq!(
+        //     &self.vertex_buffer.read().await.read().unwrap()
+        //         [vertex_offset..(vertex_offset + vertex_buffer.len())],
+        //     vertex_buffer
+        // );
         let index_offset = index_alloc.offset as usize;
-        self.index_buffer.read().await.write().unwrap()
-            [index_offset..(index_offset + indecies.len())]
-            .copy_from_slice(indecies);
+        self.index_buffer
+            .read()
+            .await
+            .new_wite_op()
+            .write(|mut v| {
+                v[index_offset..(index_offset + indecies.len())].copy_from_slice(indecies)
+            })
+            .await
+            .unwrap();
         Ok(Arc::new(Mesh {
             manager: self.clone(),
             vertex_alloc,

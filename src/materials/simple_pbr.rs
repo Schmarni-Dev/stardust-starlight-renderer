@@ -9,21 +9,22 @@ use vulkano::{
 
 use crate::{
     Context,
-    images::ImageRef,
+    images::ImageRefData,
     materials::MaterialHandle,
     resource_manager::{ResourceHandle, ResourceManager},
+    resources::{ReadOp, buffer::Bda, image::ImageReadOp},
 };
 
-#[derive(Debug, BufferContents)]
+#[derive(Debug, BufferContents, Clone, Copy)]
 #[repr(C)]
 struct PbrBufferData {
     color: Vec4,
-    color_image: u64,
+    color_image: Option<Bda<'static, ImageRefData>>,
 }
 #[derive(Debug)]
 pub struct PbrData {
     pub color: Vec4,
-    pub color_image: Option<Arc<ImageRef>>,
+    pub color_image: Option<Arc<dyn ImageReadOp>>,
 }
 impl PbrData {
     fn to_buffer_data(&self) -> PbrBufferData {
@@ -32,8 +33,9 @@ impl PbrData {
             color_image: self
                 .color_image
                 .as_ref()
-                .map(|v| v.bda().get())
-                .unwrap_or(0),
+                // # Safety
+                // a handle to this is held for as long as this is potentially accessed
+                .map(|v| unsafe { v.image_ref().bda().to_static() }),
         }
     }
 }
@@ -45,12 +47,32 @@ pub struct PbrMaterial {
 }
 impl MaterialHandle for PbrMaterial {
     unsafe fn get_device_ptr(&self) -> DeviceSize {
-        self.handle.device_address().unwrap().get()
+        // # Safety
+        // this surrounding function has the same guarantees that this needs
+        unsafe {
+            self.handle
+                .device_address()
+                .unwrap()
+                .to_static()
+                .as_raw()
+                .get()
+        }
+    }
+
+    fn get_read_ops(&self) -> impl IntoIterator<Item = Arc<dyn ReadOp>> {
+        // TODO: figure out how to make this lockless
+        // TODO: make this work for both runtime flavors? maybe?
+        let v = tokio::task::block_in_place(|| self.data.blocking_read());
+        v.color_image.clone().map(|v| v as _)
     }
 }
 impl PbrMaterial {
     pub async fn update(&self, new_data: PbrData) {
-        *self.handle.write().unwrap() = new_data.to_buffer_data();
+        self.handle
+            .new_wite_op()
+            .write(|mut v| *v = new_data.to_buffer_data())
+            .await
+            .unwrap();
         *self.data.write().await = new_data;
     }
 }
