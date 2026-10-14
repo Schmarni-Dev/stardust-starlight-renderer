@@ -2,6 +2,7 @@
 name = "starlight-renderer"
 version = "0.0.1"
 edition = "2024"
+license = "MIT-0/Apache-2.0"
 
 # this patch is needed for OpenXR support, its only used in the related examples and code that uses this crate
 [patch.crates-io]
