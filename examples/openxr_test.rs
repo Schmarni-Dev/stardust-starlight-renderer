@@ -280,6 +280,10 @@ async fn main() {
     let view_configs = oxr_instance
         .enumerate_view_configuration_views(oxr_system, ViewConfigurationType::PRIMARY_STEREO)
         .unwrap();
+    let blend_modes = oxr_instance
+        .enumerate_environment_blend_modes(oxr_system, ViewConfigurationType::PRIMARY_STEREO)
+        .unwrap();
+    let passthrough = blend_modes.contains(&EnvironmentBlendMode::ALPHA_BLEND);
     // trying to select the highest res view
     let view = view_configs
         .iter()
@@ -385,7 +389,11 @@ async fn main() {
 
         let state = oxr_frame_waiter.wait().unwrap();
         ctx.gfx_queue.with(|_| oxr_frame_stream.begin().unwrap());
-        let env_blend_mode = EnvironmentBlendMode::OPAQUE;
+        let env_blend_mode = if passthrough {
+            EnvironmentBlendMode::ALPHA_BLEND
+        } else {
+            EnvironmentBlendMode::OPAQUE
+        };
         if !state.should_render {
             _ = ctx
                 .gfx_queue
@@ -432,13 +440,17 @@ async fn main() {
             )
             .await;
 
-        let cmds =
-            StarlightCommandBuffer::new(&ctx, ctx.gfx_queue.queue_family_index()).unwrap();
+        let cmds = StarlightCommandBuffer::new(&ctx, ctx.gfx_queue.queue_family_index()).unwrap();
         let cmds = render_instance.render(
             acquired_target.write(),
             |ctx, mut cmds| {
                 opaque.record(&render_data, &image_manager, ctx, &mut cmds);
                 cmds
+            },
+            if passthrough {
+                [0.0, 0.0, 0.0, 0.0]
+            } else {
+                [0.0, 0.0, 0.0, 1.0]
             },
             cmds,
         );
@@ -507,7 +519,11 @@ async fn main() {
                     env_blend_mode,
                     &[&CompositionLayerProjection::new()
                         .views(&layer_views)
-                        .layer_flags(CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                        .layer_flags(if passthrough {
+                            CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
+                        } else {
+                            CompositionLayerFlags::EMPTY
+                        })
                         .space(&ref_space)],
                 )
             })

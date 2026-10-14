@@ -204,15 +204,18 @@ impl RenderInstance {
         &mut self,
         color_target: Box<dyn ImageWriteOp>,
         render_callback: impl FnMut(&RenderContext, StarlightCommandBuffer) -> StarlightCommandBuffer,
+        clear_color: [f32; 4],
         cmds: StarlightCommandBuffer,
     ) -> StarlightCommandBuffer {
         // self.render_inner(ctx, color_target, render_callback, cmds)
         if let Ok(rt) = tokio::runtime::Handle::try_current()
             && rt.runtime_flavor() == RuntimeFlavor::CurrentThread
         {
-            self.render_inner(color_target, render_callback, cmds)
+            self.render_inner(color_target, render_callback, clear_color, cmds)
         } else {
-            tokio::task::block_in_place(|| self.render_inner(color_target, render_callback, cmds))
+            tokio::task::block_in_place(|| {
+                self.render_inner(color_target, render_callback, clear_color, cmds)
+            })
         }
     }
     fn render_inner(
@@ -222,6 +225,7 @@ impl RenderInstance {
             &RenderContext,
             StarlightCommandBuffer,
         ) -> StarlightCommandBuffer,
+        clear_color: [f32; 4],
         mut cmds: StarlightCommandBuffer,
     ) -> StarlightCommandBuffer {
         unsafe {
@@ -278,7 +282,7 @@ impl RenderInstance {
                     color_attachments: vec![
                         Some(RenderingAttachmentInfo {
                             load_op: AttachmentLoadOp::Clear,
-                            clear_value: Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+                            clear_value: Some(ClearValue::Float(clear_color)),
                             image_layout: ImageLayout::General,
                             ..RenderingAttachmentInfo::image_view(opaque.image_view())
                         }),

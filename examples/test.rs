@@ -455,6 +455,7 @@ impl ApplicationHandler for App {
                         );
                         cmds
                     },
+                    [0.0, 0.0, 0.0, 1.0],
                     cmds,
                 );
                 self.ctx
