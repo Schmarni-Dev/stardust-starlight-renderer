@@ -26,7 +26,7 @@ use starlight_renderer::{
     mesh_manager::{MeshManager, VertexData},
     object_manager::{ObjectManager, RenderInvocationData},
     queue::SyncPoint,
-    render::{RenderInstance, SubPass, ViewData},
+    render::{HistogramSize, RenderInstance, SubPass, ViewData},
     subpasses::simple_opaque::SimpleOpaque,
 };
 use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
@@ -315,6 +315,8 @@ async fn main() {
         Format::D32_SFLOAT,
         // not sure if msaa works yet
         SampleCount::Sample1,
+        32,
+        HistogramSize::Scaled(Vec2::ONE),
     );
     let image_array_layers = views
         .len()

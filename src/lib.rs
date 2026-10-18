@@ -151,6 +151,7 @@ impl Context {
             khr_external_semaphore: true,
             khr_external_semaphore_fd: true,
             khr_push_descriptor: true,
+            ext_shader_atomic_float: true,
             // ext_rgba10x6_formats: true,
             ..Default::default()
         } | additional_device_exts;
@@ -181,6 +182,7 @@ impl Context {
             shader_int64: true,
             shader_int8: true,
             shader_draw_parameters: true,
+            shader_buffer_float32_atomic_add: true,
             storage_buffer8_bit_access: true,
             independent_blend: true,
             ..Default::default()

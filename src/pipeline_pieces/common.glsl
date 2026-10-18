@@ -69,4 +69,5 @@ layout(buffer_reference, scalar) readonly buffer CamBuf {
 layout(push_constant) uniform _pc {
     CamBuf cam_ptr;
     MetadataBuf metadata_ptr;
+	u32vec2 resolution;
 } pc;

@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use glam::{Mat4, UVec2, UVec3};
+use glam::{Mat4, UVec2, UVec3, Vec2};
 use tokio::runtime::RuntimeFlavor;
 use vulkano::{
     DeviceAddress,
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
-    command_buffer::{
-        RecordingCommandBuffer, RenderingAttachmentInfo, RenderingInfo, SubpassContents,
-    },
+    command_buffer::{RenderingAttachmentInfo, RenderingInfo, SubpassContents},
     format::{ClearValue, Format},
     image::{Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, SampleCount},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
@@ -22,8 +20,8 @@ use crate::{
     images::{ImageManager, transient_attachment::TransientAttachment},
     materials::MaterialHandle,
     object_manager::RenderInvocationData,
-    resources::image::ImageWriteOp,
-    subpasses::fullscreen_resolve::FullscreenResolve,
+    resources::{buffer::StarlightSubBuffer, image::ImageWriteOp},
+    subpasses::{fullscreen_resolve::FullscreenResolve, wboit::WboitCdfBuildCompute},
 };
 
 pub trait SubPass<Material: MaterialHandle> {
@@ -38,9 +36,15 @@ pub trait SubPass<Material: MaterialHandle> {
 pub struct RenderContext {
     pub opaque: TransientAttachment,
     pub depth: TransientAttachment,
-    pub wboit: TransientAttachment,
+    pub wboit_accum: TransientAttachment,
+    // accumulated optical depth/modified alpha
     pub wboit_revealage: TransientAttachment,
-    pub previous_wboit_revealage: Arc<Image>,
+    /// histogram data populated in the wboit accum step
+    pub histogram: Subbuffer<[f32]>,
+    /// 3D image sampled in the wboit accum step
+    /// updated at the end of the render
+    /// will contain the data from the last frame
+    pub cdf: Arc<Image>,
     // pub previous_wboit_revealage: Arc<Image>,
     pub views_bda: DeviceAddress,
 }
@@ -52,19 +56,22 @@ pub struct ViewData {
 }
 pub struct RenderInstance {
     resolution: UVec3,
-    previous_wboit_revealage: Arc<Image>,
+    bins: u32,
     views: Subbuffer<[ViewData]>,
     multiview_mask: u32,
     depth_format: Format,
     fullscreen_pass: FullscreenResolve,
+    wboit_compute: WboitCdfBuildCompute,
     render_ctx: RenderContext,
+    wboit_setup: bool,
 }
 
-pub enum Texture {
-    Image(Arc<Image>),
-    Dmatex(Arc<Image>),
+pub enum HistogramSize {
+    Scaled(Vec2),
+    Absoulte(UVec2),
 }
 
+// TODO: make wboit optional, ideally in a way that allows for different transparency methods
 impl RenderInstance {
     pub fn new(
         ctx: &Context,
@@ -73,6 +80,8 @@ impl RenderInstance {
         color_format: Format,
         depth_format: Format,
         msaa: SampleCount,
+        wboit_depth_bins: u32,
+        wboit_historgram_size: HistogramSize,
     ) -> Self {
         let resolution = resolution.extend(views.len() as u32);
         // TODO: msaa, needs custom_resolve i think, which needs custom bindings because even ash
@@ -159,42 +168,65 @@ impl RenderInstance {
             "Transient WBOIT Revealage Target",
         )
         .unwrap();
-        let previous_wboit_revealage = Image::new(
+        let histogram_res = match &wboit_historgram_size {
+            HistogramSize::Scaled(scale) => UVec2::from_array(
+                [resolution.x as f32 * scale.x, resolution.y as f32 * scale.y]
+                    .map(|v| v.round() as u32),
+            ),
+            HistogramSize::Absoulte(res) => *res,
+        };
+        let create_histogram = |usage: ImageUsage| {
+            let res = histogram_res;
+            Image::new(
+                ctx.alloc.clone(),
+                ImageCreateInfo {
+                    image_type: ImageType::Dim3d,
+                    format: Format::R32_SFLOAT,
+                    extent: [res.x, res.y, wboit_depth_bins],
+                    // array_layers: views_buffer.len() as u32,
+                    samples,
+                    usage,
+                    ..Default::default()
+                },
+                Default::default(),
+            )
+            .unwrap()
+        };
+        let histogram = Buffer::new_slice(
             ctx.alloc.clone(),
-            ImageCreateInfo {
-                image_type: ImageType::Dim2d,
-                format: Format::R8_UNORM,
-                extent: [resolution.x, resolution.y, 1],
-                array_layers: views_buffer.len() as u32,
-                samples,
-                usage: ImageUsage::TRANSIENT_ATTACHMENT
-                    | ImageUsage::COLOR_ATTACHMENT
-                    | ImageUsage::INPUT_ATTACHMENT,
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             Default::default(),
+            (histogram_res.x * histogram_res.y * wboit_depth_bins) as u64,
         )
         .unwrap();
+        let cdf = create_histogram(ImageUsage::STORAGE | ImageUsage::SAMPLED);
         let render_ctx = RenderContext {
             opaque,
             depth,
-            wboit,
+            wboit_accum: wboit,
             wboit_revealage: revealage,
-            previous_wboit_revealage: previous_wboit_revealage.clone(),
             views_bda: views_buffer.device_address().unwrap().get(),
+            histogram,
+            cdf,
         };
         let mut multiview_mask = 0;
         for i in 0..views.len() {
             multiview_mask |= 1 << i;
         }
+        let wboit_compute = WboitCdfBuildCompute::new(ctx);
         Self {
             resolution,
-            previous_wboit_revealage,
             views: views_buffer,
             depth_format,
             fullscreen_pass: FullscreenResolve::new(ctx, color_format, views),
             render_ctx,
             multiview_mask,
+            bins: wboit_depth_bins,
+            wboit_setup: false,
+            wboit_compute,
         }
     }
     pub fn update_view(&self, view_index: usize, data: ViewData) {
@@ -232,11 +264,31 @@ impl RenderInstance {
             let RenderContext {
                 opaque,
                 depth,
-                wboit,
+                wboit_accum: wboit,
                 wboit_revealage,
-                previous_wboit_revealage: _,
                 views_bda: _,
+                histogram: _,
+                cdf,
             } = &self.render_ctx;
+            if !self.wboit_setup {
+                self.wboit_setup = true;
+                cmds.inner()
+                    .pipeline_barrier(&DependencyInfo {
+                        dependency_flags: DependencyFlags::BY_REGION,
+                        image_memory_barriers: [ImageMemoryBarrier {
+                            dst_stages: PipelineStages::FRAGMENT_SHADER,
+                            dst_access: AccessFlags::SHADER_SAMPLED_READ,
+                            old_layout: ImageLayout::Undefined,
+                            new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                            subresource_range: cdf.subresource_range(),
+                            ..ImageMemoryBarrier::image(cdf.clone())
+                        }]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    })
+                    .unwrap();
+            }
             cmds.inner()
                 .pipeline_barrier(&DependencyInfo {
                     dependency_flags: DependencyFlags::BY_REGION,
@@ -274,7 +326,9 @@ impl RenderInstance {
                     .collect(),
                     ..Default::default()
                 })
-                .unwrap()
+                .unwrap();
+            self.wboit_compute.record(&mut cmds, &self.render_ctx);
+            cmds.inner()
                 .begin_rendering(&RenderingInfo {
                     layer_count: 1,
                     // TODO: handle multiview
@@ -287,10 +341,14 @@ impl RenderInstance {
                             ..RenderingAttachmentInfo::image_view(opaque.image_view())
                         }),
                         Some(RenderingAttachmentInfo {
+                            load_op: AttachmentLoadOp::Clear,
+                            clear_value: Some(ClearValue::Float([0.0; 4])),
                             image_layout: ImageLayout::General,
                             ..RenderingAttachmentInfo::image_view(wboit.image_view())
                         }),
                         Some(RenderingAttachmentInfo {
+                            load_op: AttachmentLoadOp::Clear,
+                            clear_value: Some(ClearValue::Float([0.0; 4])),
                             image_layout: ImageLayout::General,
                             ..RenderingAttachmentInfo::image_view(wboit_revealage.image_view())
                         }),

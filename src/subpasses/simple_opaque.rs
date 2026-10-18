@@ -56,6 +56,7 @@ impl SubPass<PbrMaterial> for SimpleOpaque {
 
         tokio::runtime::Handle::current().block_on(data.bind_buffers(cmds));
         let metadata_ptr = data.metadata_bda(cmds);
+        let res = ctx.opaque.image().extent();
         unsafe {
             cmds.inner()
                 .push_constants(
@@ -64,6 +65,7 @@ impl SubPass<PbrMaterial> for SimpleOpaque {
                     &crate::pipeline_pieces::mesh_vertex_shader::__pc {
                         cam_ptr: ctx.views_bda,
                         metadata_ptr,
+                        resolution: [res[0], res[1]],
                     },
                 )
                 .unwrap();
