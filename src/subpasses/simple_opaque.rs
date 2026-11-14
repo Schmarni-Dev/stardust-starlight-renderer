@@ -90,7 +90,7 @@ impl SimpleOpaque {
             .unwrap()
             .entry_point("main")
             .unwrap();
-        let fs = crate::materials::simple_pbr::fs::load(ctx.device.clone())
+        let fs = crate::materials::simple_pbr::fs_opaque::load(ctx.device.clone())
             .unwrap()
             .entry_point("main")
             .unwrap();
@@ -100,18 +100,11 @@ impl SimpleOpaque {
             PipelineShaderStageCreateInfo::new(fs),
         ];
         let layout = PipelineLayout::new(ctx.device.clone(), {
-            let generated_layout = PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages);
-            let v = image_common::get_pipeline_layout_info(
-                generated_layout.push_constant_ranges,
-                ShaderStages::FRAGMENT,
+            let mut v = PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages);
+            v.set_layouts = vec![image_common::get_descriptor_set_layout_info(
                 ctx,
-            );
-            // v.set_layouts[1].flags |= DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR;
-            // v.set_layouts[1]
-            //     .bindings
-            //     .get_mut(&0)
-            //     .unwrap()
-            //     .descriptor_count = 1;
+                ShaderStages::FRAGMENT,
+            )];
             v.into_pipeline_layout_create_info(ctx.device.clone())
                 .unwrap()
         })

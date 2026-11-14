@@ -35,6 +35,7 @@ use vulkano::{
 use crate::{
     Context,
     render::{RenderContext, ViewData},
+    vulkano_exts::RecordingCommandBufferExt,
 };
 #[derive(Debug, BufferContents, Vertex, Clone, Copy)]
 #[repr(C)]
@@ -82,10 +83,16 @@ impl FullscreenResolve {
                                 image_layout: ImageLayout::General,
                             },
                         ),
+                        // WriteDescriptorSet::image_view_with_layout(
+                        //     4,
+                        //     DescriptorImageViewInfo {
+                        //         image_view: ctx.depth.image_view(),
+                        //         image_layout: ImageLayout::General,
+                        //     },
+                        // ),
                     ],
                 )
                 .unwrap()
-                // .set_input_attachment_indecies(&[0, u32::MAX, u32::MAX, u32::MAX], Some(1), None)
                 .bind_pipeline_graphics(&self.pipeline)
                 .unwrap()
                 .draw_indexed(6, 1, 0, 0, 0)
@@ -277,26 +284,8 @@ mod vs {
 mod fs {
     vulkano_shaders::shader! {
     ty: "fragment",
-    src: r"
-                #version 450
-
-                layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput inputColor;
-                layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput inputWboitAccum;
-                layout(input_attachment_index = 2, set = 0, binding = 2) uniform subpassInput inputWboitRevealage;
-
-
-                layout(location = 3) out vec4 color;
-
-                void main() {
-                    vec4 opaque = subpassLoad(inputColor);
-                    vec4 wboit_accum = subpassLoad(inputWboitAccum);
-                    float wboit_alpha = 1.0 - exp(-subpassLoad(inputWboitRevealage).r);
-                    vec4 wboit = vec4(wboit_accum.rgb / max(wboit_accum.a, 1e-5) * wboit_alpha, wboit_alpha);
-                    // float d = subpassLoad(inputDepth).r;
-                    // color = vec4(d,d,d,1.0);
-                    color = vec4((opaque * (1 - wboit.a)) + wboit);
-                }
-            ",
+        path: "src/subpasses/fullscreen_resolve.frag"
+        // bytes: "out.spv"
 
         }
 }

@@ -24,8 +24,17 @@ void main() {
     float total = 0.0;
     // TODO: figure out if we want to run this backwards
     for (int bin = 0; bin < size.z; ++bin) {
-		uint index = (xy.x * size.y) + (xy.y * size.z) + bin;
+        uint index = (xy.x * size.y + xy.y) * size.z + bin;
+        // TODO: does this need "nonuniformEXT"?
         total += histogram.data[index];
         imageStore(cdf, ivec3(xy, bin), vec4(total, 0.0, 0.0, 0.0));
     }
+    // float v = 0.0;
+    // // TODO: figure out if we want to run this backwards
+    // for (int bin = 0; bin < size.z; ++bin) {
+    //     uint index = (xy.x * size.y + xy.y) * size.z + bin;
+    //     // TODO: does this need "nonuniformEXT"?
+    //     v += histogram.data[index];
+    //     imageStore(cdf, ivec3(xy, bin), vec4(v / total, 0.0, 0.0, 0.0));
+    // }
 }

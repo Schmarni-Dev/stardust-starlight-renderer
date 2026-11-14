@@ -1,28 +1,30 @@
 use std::sync::Arc;
 
-use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
 use vulkano::{
-    buffer::Subbuffer,
-    descriptor_set::{WriteDescriptorSet, layout::DescriptorSetLayoutCreateFlags},
-    image::{Image, ImageLayout, view::ImageView},
+    descriptor_set::{
+        WriteDescriptorSet,
+        layout::{
+            DescriptorSetLayoutBinding, DescriptorSetLayoutCreateFlags,
+            DescriptorSetLayoutCreateInfo, DescriptorType,
+        },
+    },
+    image::ImageLayout,
     pipeline::{
         ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo, compute::ComputePipelineCreateInfo,
         layout::PipelineDescriptorSetLayoutCreateInfo,
     },
+    shader::ShaderStages,
     sync::{
         AccessFlags, BufferMemoryBarrier, DependencyFlags, DependencyInfo, ImageMemoryBarrier,
         PipelineStages,
     },
 };
 
-use crate::{
-    Context, command_buffer::StarlightCommandBuffer, render::RenderContext, resources::ReadOp,
-};
+use crate::{Context, command_buffer::StarlightCommandBuffer, render::RenderContext};
 
 pub struct WboitCdfBuildCompute {
     pipeline: Arc<ComputePipeline>,
-    timeline: Arc<TimelineSyncObj>,
 }
 impl WboitCdfBuildCompute {
     pub fn new(ctx: &Context) -> Self {
@@ -46,13 +48,9 @@ impl WboitCdfBuildCompute {
             ComputePipelineCreateInfo::stage_layout(stage, pipeline_layout),
         )
         .unwrap();
-        let timeline = Arc::new(TimelineSyncObj::new(&ctx.drm_render_node).unwrap());
-        unsafe { timeline.signal(1).unwrap() };
-        Self { pipeline, timeline }
+        Self { pipeline }
     }
     pub fn record(&self, cmds: &mut StarlightCommandBuffer, ctx: &RenderContext) {
-        // TODO: cache this somewhere lol
-        let cdf_view = ImageView::new_default(ctx.cdf.clone()).unwrap();
         unsafe {
             cmds.inner()
                 .pipeline_barrier(&DependencyInfo {
@@ -62,9 +60,9 @@ impl WboitCdfBuildCompute {
                         src_access: AccessFlags::SHADER_STORAGE_WRITE,
                         dst_stages: PipelineStages::COMPUTE_SHADER,
                         dst_access: AccessFlags::SHADER_STORAGE_READ,
-                        range: ctx.histogram.offset()
-                            ..(ctx.histogram.offset() + ctx.histogram.size()),
-                        ..BufferMemoryBarrier::buffer(ctx.histogram.buffer().clone())
+                        range: ctx.wboit.histogram.offset()
+                            ..(ctx.wboit.histogram.offset() + ctx.wboit.histogram.size()),
+                        ..BufferMemoryBarrier::buffer(ctx.wboit.histogram.buffer().clone())
                     }]
                     .into_iter()
                     .collect(),
@@ -75,15 +73,15 @@ impl WboitCdfBuildCompute {
                         dst_access: AccessFlags::SHADER_STORAGE_WRITE,
                         old_layout: ImageLayout::ShaderReadOnlyOptimal,
                         new_layout: ImageLayout::General,
-                        subresource_range: ctx.cdf.subresource_range(),
-                        ..ImageMemoryBarrier::image(ctx.cdf.clone())
+                        subresource_range: ctx.wboit.cdf.subresource_range(),
+                        ..ImageMemoryBarrier::image(ctx.wboit.cdf.clone())
                     }]
                     .into_iter()
                     .collect(),
                     ..Default::default()
                 })
                 .unwrap();
-            let [size_x, size_y, _] = ctx.cdf.extent();
+            let [size_x, size_y, _] = ctx.wboit.cdf.extent();
             cmds.inner()
                 .bind_pipeline_compute(&self.pipeline)
                 .unwrap()
@@ -92,8 +90,8 @@ impl WboitCdfBuildCompute {
                     self.pipeline.layout(),
                     0,
                     &[
-                        WriteDescriptorSet::buffer(0, ctx.histogram.clone()),
-                        WriteDescriptorSet::image_view(1, cdf_view.clone()),
+                        WriteDescriptorSet::buffer(0, ctx.wboit.histogram.clone()),
+                        WriteDescriptorSet::image_view(1, ctx.wboit.cdf_view.clone()),
                     ],
                 )
                 .unwrap()
@@ -104,11 +102,11 @@ impl WboitCdfBuildCompute {
                     buffer_memory_barriers: [BufferMemoryBarrier {
                         src_stages: PipelineStages::COMPUTE_SHADER,
                         src_access: AccessFlags::SHADER_STORAGE_READ,
-                        dst_stages: PipelineStages::FRAGMENT_SHADER,
-                        dst_access: AccessFlags::SHADER_STORAGE_WRITE,
-                        range: ctx.histogram.offset()
-                            ..(ctx.histogram.offset() + ctx.histogram.size()),
-                        ..BufferMemoryBarrier::buffer(ctx.histogram.buffer().clone())
+                        dst_stages: PipelineStages::CLEAR,
+                        dst_access: AccessFlags::TRANSFER_WRITE,
+                        range: ctx.wboit.histogram.offset()
+                            ..(ctx.wboit.histogram.offset() + ctx.wboit.histogram.size()),
+                        ..BufferMemoryBarrier::buffer(ctx.wboit.histogram.buffer().clone())
                     }]
                     .into_iter()
                     .collect(),
@@ -119,8 +117,26 @@ impl WboitCdfBuildCompute {
                         dst_access: AccessFlags::SHADER_SAMPLED_READ,
                         old_layout: ImageLayout::General,
                         new_layout: ImageLayout::ShaderReadOnlyOptimal,
-                        subresource_range: ctx.cdf.subresource_range(),
-                        ..ImageMemoryBarrier::image(ctx.cdf.clone())
+                        subresource_range: ctx.wboit.cdf.subresource_range(),
+                        ..ImageMemoryBarrier::image(ctx.wboit.cdf.clone())
+                    }]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .fill_buffer(ctx.wboit.histogram.reinterpret_ref(), 0f32.to_bits())
+                .unwrap()
+                .pipeline_barrier(&DependencyInfo {
+                    dependency_flags: DependencyFlags::BY_REGION,
+                    buffer_memory_barriers: [BufferMemoryBarrier {
+                        src_stages: PipelineStages::CLEAR,
+                        src_access: AccessFlags::TRANSFER_WRITE,
+                        dst_stages: PipelineStages::FRAGMENT_SHADER,
+                        dst_access: AccessFlags::SHADER_STORAGE_WRITE,
+                        range: ctx.wboit.histogram.offset()
+                            ..(ctx.wboit.histogram.offset() + ctx.wboit.histogram.size()),
+                        ..BufferMemoryBarrier::buffer(ctx.wboit.histogram.buffer().clone())
                     }]
                     .into_iter()
                     .collect(),
@@ -128,29 +144,7 @@ impl WboitCdfBuildCompute {
                 })
                 .unwrap();
         }
-        cmds.used_reads.push(Arc::new(DummyReadOp {
-            _cdf: ctx.cdf.clone(),
-            _cdf_view: cdf_view,
-            _histogram: ctx.histogram.clone(),
-            timeline: self.timeline.clone(),
-        }));
-    }
-}
-
-// TODO: handle this correctly :3
-struct DummyReadOp {
-    _cdf: Arc<Image>,
-    _cdf_view: Arc<ImageView>,
-    _histogram: Subbuffer<[f32]>,
-    timeline: Arc<TimelineSyncObj>,
-}
-impl ReadOp for DummyReadOp {
-    fn timeline(&self) -> &TimelineSyncObj {
-        &self.timeline
-    }
-
-    fn acquire_point(&self) -> u64 {
-        1
+        cmds.used_reads.push(ctx.wboit.clone());
     }
 }
 
@@ -159,5 +153,60 @@ mod compute {
         ty: "compute",
         path: "src/pipeline_pieces/wboit_build_cdf.comp",
         include: ["src/materials/", "src/pipeline_pieces/"],
+    }
+}
+
+pub fn push_descriptors(
+    cmds: &mut StarlightCommandBuffer,
+    ctx: &RenderContext,
+    layout: &PipelineLayout,
+) {
+    // cmds.used_reads.push(ctx.wboit.clone());
+    unsafe {
+        cmds.inner()
+            .push_descriptor_set(
+                PipelineBindPoint::Graphics,
+                layout,
+                1,
+                &[
+                    WriteDescriptorSet::sampler(0, ctx.wboit.cdf_sampler.clone()),
+                    WriteDescriptorSet::image_view(1, ctx.wboit.cdf_view.clone()),
+                    WriteDescriptorSet::buffer(2, ctx.wboit.histogram.clone()),
+                ],
+            )
+            .unwrap();
+    }
+}
+
+/// Needs to be at index 1
+pub fn get_descriptor_set_layout_info(stages: ShaderStages) -> DescriptorSetLayoutCreateInfo {
+    DescriptorSetLayoutCreateInfo {
+        flags: DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR,
+        bindings: [
+            (
+                0,
+                DescriptorSetLayoutBinding {
+                    stages,
+                    ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::Sampler)
+                },
+            ),
+            (
+                1,
+                DescriptorSetLayoutBinding {
+                    stages,
+                    ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::SampledImage)
+                },
+            ),
+            (
+                2,
+                DescriptorSetLayoutBinding {
+                    stages,
+                    ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        ..DescriptorSetLayoutCreateInfo::default()
     }
 }

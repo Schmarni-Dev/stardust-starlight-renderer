@@ -27,9 +27,11 @@ use starlight_renderer::{
     object_manager::{ObjectManager, RenderInvocationData},
     queue::SyncPoint,
     render::{HistogramSize, RenderInstance, SubPass, ViewData},
-    subpasses::simple_opaque::SimpleOpaque,
+    subpasses::{simple_opaque::SimpleOpaque, simple_transparent::SimpleTransparent},
 };
 use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::EnvFilter;
 use vulkano::{
     Handle, Version, VulkanError, VulkanLibrary, VulkanObject,
     device::{DeviceExtensions, DeviceFeatures},
@@ -56,6 +58,13 @@ unsafe extern "system" fn vk_instance_proc_addr(
 }
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
     let entry = VulkanLibrary::new().unwrap();
     _ = VK_ENTRY.set(entry.clone());
     let oxr_entry = unsafe { openxr::Entry::load() }.unwrap();
@@ -195,9 +204,36 @@ async fn main() {
             ],
         )
         .await;
+    let image2 = LocalImage::new(
+        &ctx,
+        false,
+        Format::R8G8B8A8_UNORM,
+        None,
+        None,
+        starlight_renderer::images::ImageResolution::D2([2, 2].into()),
+        1,
+        ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+        Some("Test Texture"),
+        MemoryTypeFilter::PREFER_DEVICE,
+    );
+    image2
+        .new_write_op()
+        .upload_tmp_staged(
+            &ctx,
+            &[
+                [255, 0u8, 255, 255],
+                [0u8, 0u8, 0u8, 255],
+                [0u8, 0u8, 0u8, 255],
+                [255, 0u8, 255, 255],
+            ],
+        )
+        .await;
     let sampler = Sampler::new(ctx.device.clone(), SamplerCreateInfo::default()).unwrap();
     let sampler_ref = image_manager.alloc_sampler(sampler).await.unwrap();
     let image_ref = image
+        .new_read_op(&ctx, &mut image_manager, sampler_ref.clone())
+        .await;
+    let image2_ref = image2
         .new_read_op(&ctx, &mut image_manager, sampler_ref)
         .await;
     let mesh = mesh_manager
@@ -247,6 +283,36 @@ async fn main() {
         )
         .await
         .unwrap();
+    let mat_4 = pbr_mats
+        .alloc(
+            &ctx,
+            PbrData {
+                color: [0.0, 1.0, 0.0, 0.5].into(),
+                color_image: None,
+            },
+        )
+        .await
+        .unwrap();
+    let mat_5 = pbr_mats
+        .alloc(
+            &ctx,
+            PbrData {
+                color: [1.0, 1.0, 1.0, 0.5].into(),
+                color_image: Some(image2_ref.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    let mat_6 = pbr_mats
+        .alloc(
+            &ctx,
+            PbrData {
+                color: [1.0, 0.0, 0.0, 0.5].into(),
+                color_image: None,
+            },
+        )
+        .await
+        .unwrap();
     let obj_1 = object_manager
         .alloc(
             &ctx,
@@ -274,8 +340,46 @@ async fn main() {
         )
         .await
         .unwrap();
-    let render_data =
-        RenderInvocationData::new(&ctx, vec![obj_1.clone(), obj_2.clone(), obj_3.clone()]).unwrap();
+    let obj_4 = object_manager
+        .alloc(
+            &ctx,
+            &mesh,
+            &mat_4,
+            Mat4::from_translation(vec3(0.1, 0.15, -0.25)) * Mat4::from_scale(Vec3::splat(0.001)),
+        )
+        .await
+        .unwrap();
+    let obj_5 = object_manager
+        .alloc(
+            &ctx,
+            &mesh,
+            &mat_5,
+            Mat4::from_translation(vec3(-0.1, -0.2, -0.3)) * Mat4::from_scale(Vec3::splat(0.002)),
+        )
+        .await
+        .unwrap();
+    let obj_6 = object_manager
+        .alloc(
+            &ctx,
+            &mesh,
+            &mat_6,
+            Mat4::from_translation(vec3(0.15, 0.15, -0.251)) * Mat4::from_scale(Vec3::splat(0.001)),
+        )
+        .await
+        .unwrap();
+    let mesh_read_op = mesh_manager.new_read_op().await;
+    let opaque_render_data = RenderInvocationData::new(
+        &ctx,
+        vec![obj_1.clone(), obj_2.clone(), obj_3.clone()],
+        &mesh_read_op,
+    )
+    .unwrap();
+    let transparent_render_data = RenderInvocationData::new(
+        &ctx,
+        vec![obj_4.clone(), obj_5.clone(), obj_6.clone()],
+        &mesh_read_op,
+    )
+    .unwrap();
     println!("running app");
     let view_configs = oxr_instance
         .enumerate_view_configuration_views(oxr_system, ViewConfigurationType::PRIMARY_STEREO)
@@ -356,6 +460,7 @@ async fn main() {
 
     let mut session_running = false;
     let mut opaque = SimpleOpaque::new(&ctx, format, Format::D32_SFLOAT, &views);
+    let mut transparent = SimpleTransparent::new(&ctx, format, Format::D32_SFLOAT, &views);
     let frame_timeline = Arc::new(TimelineSyncObj::new(&ctx.drm_render_node).unwrap());
     let mut frame_wait_point = 1u64;
     let start_time = Instant::now();
@@ -441,12 +546,41 @@ async fn main() {
                     * Mat4::from_rotation_y(start_time.elapsed().as_secs_f32()),
             )
             .await;
+        // let rot_mat = Mat4::from_rotation_x(start_time.elapsed().as_secs_f32() / 10.0);
+        let rot_mat = Mat4::from_translation(Vec3::Y * 0.2);
+        obj_4
+            .update_global_transform(
+                rot_mat
+                    * Mat4::from_translation(vec3(
+                        t3 * 0.1,
+                        (t2 * 0.15) + 0.1,
+                        (t * -0.25) + -0.25,
+                    ))
+                    * Mat4::from_scale(Vec3::splat(0.001)),
+            )
+            .await;
+        obj_5
+            .update_global_transform(
+                rot_mat
+                    * Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
+                    * Mat4::from_scale(Vec3::splat(t * 0.002)),
+            )
+            .await;
+        obj_6
+            .update_global_transform(
+                rot_mat
+                    * Mat4::from_translation(vec3(0.15, 0.15, -0.251))
+                    * Mat4::from_scale(Vec3::splat(0.001))
+                    * Mat4::from_rotation_y(start_time.elapsed().as_secs_f32()),
+            )
+            .await;
 
         let cmds = StarlightCommandBuffer::new(&ctx, ctx.gfx_queue.queue_family_index()).unwrap();
         let cmds = render_instance.render(
             acquired_target.write(),
             |ctx, mut cmds| {
-                opaque.record(&render_data, &image_manager, ctx, &mut cmds);
+                opaque.record(&opaque_render_data, &image_manager, ctx, &mut cmds);
+                transparent.record(&transparent_render_data, &image_manager, ctx, &mut cmds);
                 cmds
             },
             if passthrough {

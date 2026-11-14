@@ -1,4 +1,8 @@
-use std::{fs::File, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    sync::Arc,
+};
 
 use ash::vk;
 use timeline_syncobj::{render_node::DrmRenderNode, timeline_syncobj::TimelineSyncObj};
@@ -95,6 +99,19 @@ impl StarlightQueue {
         // TODO: bubble error up? don't unwrap
         let points = self.drm_render_node.query_signaled_points(&objs).unwrap();
         let mut wait_semaphores = vec![];
+        // let mut seen_timelines = Vec::<&(&TimelineSyncObj, u64)>::new();
+        // if acquires.iter().any(|v| {
+        //     let out = seen_timelines
+        //         .iter()
+        //         .find(|t| unsafe { t.0.get_raw_handle() == v.0.get_raw_handle() })
+        //         .is_some_and(|p| p.1 != v.1);
+        //     if !out {
+        //         seen_timelines.push(v);
+        //     }
+        //     out
+        // }) {
+        //
+        // };
         if acquires.iter().enumerate().any(|(i, v)| v.1 > points[i]) {
             if self.warn_on_gpu_wait {
                 tracing::warn!(

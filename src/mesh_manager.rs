@@ -13,7 +13,7 @@ use vulkano::{
     pipeline::graphics::vertex_input::Vertex,
 };
 
-use crate::resources::buffer::StarlightSubBuffer;
+use crate::resources::buffer::{StarlightSubBuffer, StarlightSubBufferReadOp};
 
 #[derive(Vertex, BufferContents, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -39,11 +39,23 @@ pub struct SkinnedVertex {
 pub struct MeshManager {
     id: u32,
 
-    pub(crate) vertex_buffer: RwLock<StarlightSubBuffer<[VertexData]>>,
-    pub(crate) index_buffer: RwLock<StarlightSubBuffer<[u32]>>,
+    vertex_buffer: RwLock<StarlightSubBuffer<[VertexData]>>,
+    index_buffer: RwLock<StarlightSubBuffer<[u32]>>,
     allocs: Mutex<Allocs>,
     vertex_len: AtomicU64,
     index_len: AtomicU64,
+}
+
+#[derive(Clone)]
+pub struct MeshManagerReadOp {
+    manager_id: u32,
+    pub vertex_buffer: Arc<StarlightSubBufferReadOp<[VertexData]>>,
+    pub index_buffer: Arc<StarlightSubBufferReadOp<[u32]>>,
+}
+impl MeshManagerReadOp {
+    pub fn from_manager(&self, manager: &MeshManager) -> bool {
+        self.manager_id == manager.id
+    }
 }
 
 struct Allocs {
@@ -236,6 +248,15 @@ impl MeshManager {
             index_alloc,
             index_len: indecies.len() as u32,
         }))
+    }
+    pub async fn new_read_op(&self) -> MeshManagerReadOp {
+        let vertex_buffer = self.vertex_buffer.read().await.new_read_op();
+        let index_buffer = self.index_buffer.read().await.new_read_op();
+        MeshManagerReadOp {
+            vertex_buffer,
+            index_buffer,
+            manager_id: self.id,
+        }
     }
 }
 impl Drop for Mesh {

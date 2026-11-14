@@ -100,11 +100,19 @@ impl PbrMaterialManager {
     }
 }
 
-pub mod fs {
+pub mod fs_opaque {
     vulkano_shaders::shader! {
         vulkan_version: "1.3",
         ty: "fragment",
-        path: "src/materials/simple_pbr.frag",
+        path: "src/materials/simple_pbr_opaque.frag",
+        include: ["src/materials/", "src/pipeline_pieces/"],
+    }
+}
+pub mod fs_wboit {
+    vulkano_shaders::shader! {
+        vulkan_version: "1.3",
+        ty: "fragment",
+        path: "src/materials/simple_pbr_wboit.frag",
         include: ["src/materials/", "src/pipeline_pieces/"],
     }
 }

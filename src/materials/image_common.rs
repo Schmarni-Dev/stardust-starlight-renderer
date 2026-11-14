@@ -10,6 +10,7 @@ use vulkano::{
 };
 
 use crate::Context;
+/// Needs to be at index 0
 pub fn get_descriptor_set_layout_info(
     ctx: &Context,
     stages: ShaderStages,
@@ -71,17 +72,5 @@ pub fn get_descriptor_set_layout_info(
         .into_iter()
         .collect(),
         ..DescriptorSetLayoutCreateInfo::default()
-    }
-}
-
-pub fn get_pipeline_layout_info(
-    push_constant_ranges: Vec<PushConstantRange>,
-    stages: ShaderStages,
-    ctx: &Context,
-) -> PipelineDescriptorSetLayoutCreateInfo {
-    PipelineDescriptorSetLayoutCreateInfo {
-        flags: PipelineLayoutCreateFlags::empty(),
-        set_layouts: vec![get_descriptor_set_layout_info(ctx, stages)],
-        push_constant_ranges,
     }
 }

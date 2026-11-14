@@ -3,55 +3,44 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : enable
+#extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_GOOGLE_include_directive : enable
 
 #include "./common.glsl"
 
-layout(set = 1, binding = 0) uniform readonly sampler cdf_sampler;
-layout(set = 1, binding = 1) uniform readonly texture3D cdf;
+layout(set = 1, binding = 0) uniform sampler cdf_sampler;
+layout(set = 1, binding = 1) uniform texture3D cdf;
 // TODO: should these be per view?
-layout(scalar, set = 0, binding = 2) writeonly buffer _histogram {
+layout(scalar, set = 1, binding = 2) writeonly buffer _histogram {
     // hope this is an f32
     float data[];
 } histogram;
-// layout(input_attachment_index = 1, set = 1, binding = 2) uniform readonly subpassInput inputDepth;
-
-// layout(buffer_reference, scalar) buffer histogram {
-//     uint32_t data;
-// };
-
-const uint32_t BINS = 32;
-const uvec2 HISTOGRAM_SIZE = uvec2(1280, 720);
 
 float optical_depth(float alpha) {
     return -log(max(1.0 - alpha, 1e-6));
 }
 // TODO: play around with this to better allocate the depth bins
 float bin_depth(vec4 frag_pos) {
-    frag_pos.z
+    return frag_pos.z;
 }
 
 /// builds the next frames histogram and returns the value to be added to the wboit accum buffer
-WboitOut wboit(vec4 frag_pos, vec4 color) {
+void wboit(vec4 frag_pos, vec4 color, out vec4 accum, out float revealage) {
+    ivec3 size = textureSize(sampler3D(cdf, cdf_sampler), 0);
     float optical_depth = optical_depth(color.w);
     float bin_depth = bin_depth(frag_pos);
 
-    uint32_t bin_index = uint32_t(bin_depth * float(BINS));
+    uint32_t bin_index = min(uint32_t(bin_depth * float(size.z)), uint32_t(size.z) - 1u);
     vec2 normalized_frag_pos = frag_pos.xy / vec2(pc.resolution);
-    uvec2 histogram_pos = uvec2(normalized_frag_pos * vec2(HISTOGRAM_SIZE));
-    // TODO: maybe average across multiple bins?
-    uint index = (xy.x * size.y) + (xy.y * size.z) + bin;
-    atomicAdd(histogram.data[index], optical_depth);
+    uvec2 xy = min(uvec2(normalized_frag_pos * vec2(size.xy)), uvec2(size.xy) - 1u); 
+	// TODO: maybe average across multiple bins?
+    uint index = (xy.x * size.y + xy.y) * size.z + bin_index;
+    atomicAdd(histogram.data[nonuniformEXT(index)], optical_depth);
 
-    float cdf_value = texture(sampler3D(cdf, cdf_sampler), vec3(frag_pos.xy, bin_depth));
+    float cdf_value = texture(sampler3D(cdf, cdf_sampler), vec3(frag_pos.xy, bin_depth)).r;
     // TODO: make sure this weight is correct
     float weight = exp(-cdf_value);
-    vec4 accum = color * weight * 64.0;
-    return WboitOut(accum, optical_depth);
-    ;
-}
-struct WboitOut {
-    vec4 accum;
-    float revealage;
+    accum = color * weight;
+    revealage = optical_depth;
 }

@@ -1,3 +1,5 @@
+#ifndef STARLIGHT_COMMON
+#define STARLIGHT_COMMON
 #extension GL_EXT_scalar_block_layout : enable
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
@@ -71,3 +73,4 @@ layout(push_constant) uniform _pc {
     MetadataBuf metadata_ptr;
 	u32vec2 resolution;
 } pc;
+#endif

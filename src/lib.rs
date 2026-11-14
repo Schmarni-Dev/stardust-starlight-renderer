@@ -122,8 +122,9 @@ impl Context {
             ..Default::default()
         } | additional_instance_exts;
         let supported_exts = entry.supported_extensions();
-        if !supported_exts.contains(&required_exts) {
-            panic!("required exts are not supported: {:#?}", supported_exts);
+        let missing = required_exts.difference(&supported_exts);
+        if !missing.is_empty() {
+            panic!("required exts are not supported: {missing:#?}");
         }
         let instance = instance_create(InstanceCreateInfo {
             application_name: app_info.name,
@@ -184,6 +185,7 @@ impl Context {
             shader_draw_parameters: true,
             shader_buffer_float32_atomic_add: true,
             storage_buffer8_bit_access: true,
+            fragment_stores_and_atomics: true,
             independent_blend: true,
             ..Default::default()
         } | additional_device_features;

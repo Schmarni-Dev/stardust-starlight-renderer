@@ -10,8 +10,8 @@ use starlight_renderer::{
     mesh_manager::{MeshManager, VertexData},
     object_manager::{Object, ObjectManager, RenderInvocationData},
     queue::SyncPoint,
-    render::{RenderInstance, SubPass, ViewData},
-    subpasses::simple_opaque::SimpleOpaque,
+    render::{HistogramSize, RenderInstance, SubPass, ViewData},
+    subpasses::{simple_opaque::SimpleOpaque, simple_transparent::SimpleTransparent},
 };
 use tokio::{runtime::Handle, task::block_in_place};
 use tracing::{info, level_filters::LevelFilter};
@@ -94,9 +94,36 @@ async fn main() {
             ],
         )
         .await;
+    let image2 = LocalImage::new(
+        &ctx,
+        false,
+        Format::R8G8B8A8_UNORM,
+        None,
+        None,
+        starlight_renderer::images::ImageResolution::D2([2, 2].into()),
+        1,
+        ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+        Some("Test Texture"),
+        MemoryTypeFilter::PREFER_DEVICE,
+    );
+    image2
+        .new_write_op()
+        .upload_tmp_staged(
+            &ctx,
+            &[
+                [255, 0u8, 255, 255],
+                [0u8, 0u8, 0u8, 255],
+                [0u8, 0u8, 0u8, 255],
+                [255, 0u8, 255, 255],
+            ],
+        )
+        .await;
     let sampler = Sampler::new(ctx.device.clone(), SamplerCreateInfo::default()).unwrap();
     let sampler_ref = image_manager.alloc_sampler(sampler).await.unwrap();
     let image_ref = image
+        .new_read_op(&ctx, &mut image_manager, sampler_ref.clone())
+        .await;
+    let image2_ref = image2
         .new_read_op(&ctx, &mut image_manager, sampler_ref)
         .await;
     let mesh = mesh_manager
@@ -146,6 +173,36 @@ async fn main() {
         )
         .await
         .unwrap();
+    let mat_4 = pbr_mats
+        .alloc(
+            &ctx,
+            PbrData {
+                color: [0.0, 1.0, 0.0, 0.5].into(),
+                color_image: None,
+            },
+        )
+        .await
+        .unwrap();
+    let mat_5 = pbr_mats
+        .alloc(
+            &ctx,
+            PbrData {
+                color: [1.0, 1.0, 1.0, 0.5].into(),
+                color_image: Some(image2_ref.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    let mat_6 = pbr_mats
+        .alloc(
+            &ctx,
+            PbrData {
+                color: [1.0, 0.0, 0.0, 0.5].into(),
+                color_image: None,
+            },
+        )
+        .await
+        .unwrap();
     let obj_1 = object_manager
         .alloc(
             &ctx,
@@ -173,8 +230,46 @@ async fn main() {
         )
         .await
         .unwrap();
-    let render_data =
-        RenderInvocationData::new(&ctx, vec![obj_1.clone(), obj_2.clone(), obj_3.clone()]).unwrap();
+    let obj_4 = object_manager
+        .alloc(
+            &ctx,
+            &mesh,
+            &mat_4,
+            Mat4::from_translation(vec3(0.1, 0.15, -0.25)) * Mat4::from_scale(Vec3::splat(0.001)),
+        )
+        .await
+        .unwrap();
+    let obj_5 = object_manager
+        .alloc(
+            &ctx,
+            &mesh,
+            &mat_5,
+            Mat4::from_translation(vec3(-0.1, -0.2, -0.3)) * Mat4::from_scale(Vec3::splat(0.002)),
+        )
+        .await
+        .unwrap();
+    let obj_6 = object_manager
+        .alloc(
+            &ctx,
+            &mesh,
+            &mat_6,
+            Mat4::from_translation(vec3(0.15, 0.15, -0.251)) * Mat4::from_scale(Vec3::splat(0.001)),
+        )
+        .await
+        .unwrap();
+    let mesh_read_op = mesh_manager.new_read_op().await;
+    let opaque_render_data = RenderInvocationData::new(
+        &ctx,
+        vec![obj_1.clone(), obj_2.clone(), obj_3.clone()],
+        &mesh_read_op,
+    )
+    .unwrap();
+    let transparent_render_data = RenderInvocationData::new(
+        &ctx,
+        vec![obj_4.clone(), obj_5.clone(), obj_6.clone()],
+        &mesh_read_op,
+    )
+    .unwrap();
     let mut app = App {
         ctx,
         window_data: None,
@@ -186,7 +281,11 @@ async fn main() {
         obj_1,
         obj_2,
         obj_3,
-        render_data,
+        obj_4,
+        obj_5,
+        obj_6,
+        opaque_render_data,
+        transparent_render_data,
         start_time: Instant::now(),
     };
 
@@ -204,8 +303,12 @@ struct App {
     obj_1: Arc<Object<PbrMaterial>>,
     obj_2: Arc<Object<PbrMaterial>>,
     obj_3: Arc<Object<PbrMaterial>>,
+    obj_4: Arc<Object<PbrMaterial>>,
+    obj_5: Arc<Object<PbrMaterial>>,
+    obj_6: Arc<Object<PbrMaterial>>,
 
-    render_data: RenderInvocationData<PbrMaterial>,
+    opaque_render_data: RenderInvocationData<PbrMaterial>,
+    transparent_render_data: RenderInvocationData<PbrMaterial>,
     start_time: Instant,
 }
 
@@ -215,6 +318,7 @@ struct WindowData {
     swap_images: Vec<WsiSwapchainImage>,
     render_instance: RenderInstance,
     opaque: SimpleOpaque,
+    transparent: SimpleTransparent,
 }
 
 fn block_please(future: impl Future) {
@@ -271,6 +375,8 @@ impl ApplicationHandler for App {
             Format::D32_SFLOAT,
             // not sure if msaa works yet
             SampleCount::Sample1,
+            32,
+            HistogramSize::Scaled(Vec2::ONE),
         );
 
         self.window_data = Some(WindowData {
@@ -282,6 +388,14 @@ impl ApplicationHandler for App {
                 .collect(),
             render_instance,
             opaque: SimpleOpaque::new(
+                &self.ctx,
+                image_format,
+                Format::D32_SFLOAT,
+                &[ViewData {
+                    world_to_clip: Mat4::IDENTITY,
+                }],
+            ),
+            transparent: SimpleTransparent::new(
                 &self.ctx,
                 image_format,
                 Format::D32_SFLOAT,
@@ -347,6 +461,8 @@ impl ApplicationHandler for App {
                         Format::D32_SFLOAT,
                         // not sure if msaa works yet
                         SampleCount::Sample1,
+                        32,
+                        HistogramSize::Scaled(Vec2::ONE),
                     );
                     window_data.swapchain = swap;
                     window_data.swap_images = images
@@ -432,6 +548,34 @@ impl ApplicationHandler for App {
                             * Mat4::from_rotation_y(self.start_time.elapsed().as_secs_f32()),
                     )
                     .await;
+                // let rot_mat = Mat4::from_rotation_x(start_time.elapsed().as_secs_f32() / 10.0);
+                let rot_mat = Mat4::from_translation(Vec3::Y * 0.2);
+                self.obj_4
+                    .update_global_transform(
+                        rot_mat
+                            * Mat4::from_translation(vec3(
+                                t3 * 0.1,
+                                (t2 * 0.15) + 0.1,
+                                (t * -0.25) + -0.25,
+                            ))
+                            * Mat4::from_scale(Vec3::splat(0.001)),
+                    )
+                    .await;
+                self.obj_5
+                    .update_global_transform(
+                        rot_mat
+                            * Mat4::from_translation(vec3(-0.1, -0.2, -0.3))
+                            * Mat4::from_scale(Vec3::splat(t * 0.002)),
+                    )
+                    .await;
+                self.obj_6
+                    .update_global_transform(
+                        rot_mat
+                            * Mat4::from_translation(vec3(0.15, 0.15, -0.251))
+                            * Mat4::from_scale(Vec3::splat(0.001))
+                            * Mat4::from_rotation_y(self.start_time.elapsed().as_secs_f32()),
+                    )
+                    .await;
                 // let camera_mat = proj_mat;
                 window_data.render_instance.update_view(
                     0,
@@ -448,7 +592,13 @@ impl ApplicationHandler for App {
                     target_image.write_op(),
                     |ctx, mut cmds| {
                         window_data.opaque.record(
-                            &self.render_data,
+                            &self.opaque_render_data,
+                            &self.image_manager,
+                            ctx,
+                            &mut cmds,
+                        );
+                        window_data.transparent.record(
+                            &self.transparent_render_data,
                             &self.image_manager,
                             ctx,
                             &mut cmds,

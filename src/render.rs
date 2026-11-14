@@ -1,13 +1,18 @@
 use std::sync::Arc;
 
 use glam::{Mat4, UVec2, UVec3, Vec2};
+use timeline_syncobj::timeline_syncobj::TimelineSyncObj;
 use tokio::runtime::RuntimeFlavor;
 use vulkano::{
     DeviceAddress,
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{RenderingAttachmentInfo, RenderingInfo, SubpassContents},
     format::{ClearValue, Format},
-    image::{Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, SampleCount},
+    image::{
+        Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, SampleCount,
+        sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo},
+        view::ImageView,
+    },
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     pipeline::graphics::viewport::{Scissor, Viewport},
     render_pass::AttachmentLoadOp,
@@ -20,7 +25,7 @@ use crate::{
     images::{ImageManager, transient_attachment::TransientAttachment},
     materials::MaterialHandle,
     object_manager::RenderInvocationData,
-    resources::{buffer::StarlightSubBuffer, image::ImageWriteOp},
+    resources::{ReadOp, image::ImageWriteOp},
     subpasses::{fullscreen_resolve::FullscreenResolve, wboit::WboitCdfBuildCompute},
 };
 
@@ -39,14 +44,30 @@ pub struct RenderContext {
     pub wboit_accum: TransientAttachment,
     // accumulated optical depth/modified alpha
     pub wboit_revealage: TransientAttachment,
+    pub wboit: Arc<WboitContext>,
+    // pub previous_wboit_revealage: Arc<Image>,
+    pub views_bda: DeviceAddress,
+}
+pub struct WboitContext {
     /// histogram data populated in the wboit accum step
     pub histogram: Subbuffer<[f32]>,
+    pub cdf_sampler: Arc<Sampler>,
     /// 3D image sampled in the wboit accum step
     /// updated at the end of the render
     /// will contain the data from the last frame
     pub cdf: Arc<Image>,
-    // pub previous_wboit_revealage: Arc<Image>,
-    pub views_bda: DeviceAddress,
+    pub cdf_view: Arc<ImageView>,
+    timeline: TimelineSyncObj,
+}
+// TODO: handle this correctly :3
+impl ReadOp for WboitContext {
+    fn timeline(&self) -> &TimelineSyncObj {
+        &self.timeline
+    }
+
+    fn acquire_point(&self) -> u64 {
+        1
+    }
 }
 
 #[derive(Debug, BufferContents, Clone, Copy)]
@@ -195,22 +216,38 @@ impl RenderInstance {
         let histogram = Buffer::new_slice(
             ctx.alloc.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::STORAGE_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST,
                 ..Default::default()
             },
             Default::default(),
-            (histogram_res.x * histogram_res.y * wboit_depth_bins) as u64,
+            dbg!((histogram_res.x * histogram_res.y * wboit_depth_bins) as u64),
         )
         .unwrap();
         let cdf = create_histogram(ImageUsage::STORAGE | ImageUsage::SAMPLED);
+        let cdf_sampler = Sampler::new(
+            ctx.device.clone(),
+            SamplerCreateInfo {
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                ..SamplerCreateInfo::simple_repeat_linear()
+            },
+        )
+        .unwrap();
+        let timeline = TimelineSyncObj::new(&ctx.drm_render_node).unwrap();
+        unsafe { timeline.signal(10).unwrap() };
+        let cdf_view = ImageView::new_default(cdf.clone()).unwrap();
         let render_ctx = RenderContext {
             opaque,
             depth,
             wboit_accum: wboit,
             wboit_revealage: revealage,
+            wboit: Arc::new(WboitContext {
+                histogram,
+                cdf_sampler,
+                cdf,
+                cdf_view,
+                timeline,
+            }),
             views_bda: views_buffer.device_address().unwrap().get(),
-            histogram,
-            cdf,
         };
         let mut multiview_mask = 0;
         for i in 0..views.len() {
@@ -264,11 +301,10 @@ impl RenderInstance {
             let RenderContext {
                 opaque,
                 depth,
-                wboit_accum: wboit,
+                wboit_accum,
                 wboit_revealage,
                 views_bda: _,
-                histogram: _,
-                cdf,
+                wboit,
             } = &self.render_ctx;
             if !self.wboit_setup {
                 self.wboit_setup = true;
@@ -280,8 +316,8 @@ impl RenderInstance {
                             dst_access: AccessFlags::SHADER_SAMPLED_READ,
                             old_layout: ImageLayout::Undefined,
                             new_layout: ImageLayout::ShaderReadOnlyOptimal,
-                            subresource_range: cdf.subresource_range(),
-                            ..ImageMemoryBarrier::image(cdf.clone())
+                            subresource_range: wboit.cdf.subresource_range(),
+                            ..ImageMemoryBarrier::image(wboit.cdf.clone())
                         }]
                         .into_iter()
                         .collect(),
@@ -297,7 +333,7 @@ impl RenderInstance {
                             PipelineStages::COLOR_ATTACHMENT_OUTPUT,
                             AccessFlags::COLOR_ATTACHMENT_WRITE,
                         ),
-                        wboit.setup_barrier(
+                        wboit_accum.setup_barrier(
                             PipelineStages::COLOR_ATTACHMENT_OUTPUT,
                             AccessFlags::COLOR_ATTACHMENT_WRITE,
                         ),
@@ -344,7 +380,7 @@ impl RenderInstance {
                             load_op: AttachmentLoadOp::Clear,
                             clear_value: Some(ClearValue::Float([0.0; 4])),
                             image_layout: ImageLayout::General,
-                            ..RenderingAttachmentInfo::image_view(wboit.image_view())
+                            ..RenderingAttachmentInfo::image_view(wboit_accum.image_view())
                         }),
                         Some(RenderingAttachmentInfo {
                             load_op: AttachmentLoadOp::Clear,
@@ -390,6 +426,14 @@ impl RenderInstance {
                     dependency_flags: DependencyFlags::BY_REGION,
                     image_memory_barriers: [
                         self.render_ctx.opaque.local_read_barrier(
+                            PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ),
+                        self.render_ctx.wboit_accum.local_read_barrier(
+                            PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                            AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ),
+                        self.render_ctx.wboit_revealage.local_read_barrier(
                             PipelineStages::COLOR_ATTACHMENT_OUTPUT,
                             AccessFlags::COLOR_ATTACHMENT_WRITE,
                         ),

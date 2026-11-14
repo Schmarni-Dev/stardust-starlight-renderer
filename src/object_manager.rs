@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use glam::Mat4;
+use tracing::warn;
 use vulkano::{
     DeviceAddress, Validated,
     buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage},
@@ -12,7 +13,7 @@ use crate::{
     Context,
     command_buffer::{StarlightCommandBuffer, StarlightIndexBuffer},
     materials::MaterialHandle,
-    mesh_manager::{Mesh, MeshManager},
+    mesh_manager::{Mesh, MeshManagerReadOp},
     resource_manager::{ResourceHandle, ResourceManager},
     resources::buffer::{Bda, StarlightSubBuffer},
 };
@@ -89,7 +90,7 @@ pub struct RenderInvocationData<Material: MaterialHandle> {
     metadata: StarlightSubBuffer<[ObjectMetadata]>,
     indirect_buf: StarlightSubBuffer<[DrawIndexedIndirectCommand]>,
     indirect_obj_count: u32,
-    mesh_manager: Arc<MeshManager>,
+    mesh_data: MeshManagerReadOp,
     // # Safety: this needs to keep the objects alive to make sure the device ptrs stay valid
     objects: Vec<Arc<Object<Material>>>,
 }
@@ -97,6 +98,7 @@ impl<Material: MaterialHandle> RenderInvocationData<Material> {
     pub fn new<'a>(
         ctx: &Context,
         objects: Vec<Arc<Object<Material>>>,
+        mesh_data: &MeshManagerReadOp,
     ) -> Result<Self, Validated<AllocateBufferError>> {
         let metadata_buf = Buffer::new_slice(
             ctx.alloc.clone(),
@@ -143,6 +145,9 @@ impl<Material: MaterialHandle> RenderInvocationData<Material> {
             let index_len = unsafe { mesh.as_ref_unchecked().index_len };
             let first_instance = metadata_i;
             for obj in &objs {
+                if !mesh_data.from_manager(&obj.mesh.manager) {
+                    warn!("Object with mesh from different mesh manager");
+                }
                 meta_writer[metadata_i] = ObjectMetadata {
                     // # Safety: the material handle is kept alive by storing it in the RenderInvocationData
                     material: unsafe { obj.material.get_device_ptr() },
@@ -178,22 +183,23 @@ impl<Material: MaterialHandle> RenderInvocationData<Material> {
             indirect_obj_count,
             indirect_buf,
             // TODO: make sure all meshes come from the same manager and handle empty objects vec
-            mesh_manager: objects[0].mesh.manager.clone(),
+            mesh_data: mesh_data.clone(),
             objects,
         })
     }
     pub async fn bind_buffers(&self, cmds: &mut StarlightCommandBuffer) {
-        let vbuf = self.mesh_manager.vertex_buffer.read().await;
-        let ibuf = self.mesh_manager.index_buffer.read().await;
         cmds.used_reads
             .extend(self.objects.iter().flat_map(|v| v.material.get_read_ops()));
 
         // TODO: make sure that this vertex buffer isn't dropped until the gpu work is done,
         // this could happen if the vertex buffer has to grow
-        cmds.bind_vertex_buffers(0, &[vbuf.new_read_op()]).unwrap();
-        // TODO: also make sure this survives, same as with the vertex buffer
-        cmds.bind_index_buffer(&StarlightIndexBuffer::U32(ibuf.new_read_op()))
+        cmds.bind_vertex_buffers(0, &[self.mesh_data.vertex_buffer.clone()])
             .unwrap();
+        // TODO: also make sure this survives, same as with the vertex buffer
+        cmds.bind_index_buffer(&StarlightIndexBuffer::U32(
+            self.mesh_data.index_buffer.clone(),
+        ))
+        .unwrap();
     }
     pub fn metadata_bda(&self, cmds: &mut StarlightCommandBuffer) -> DeviceAddress {
         cmds.used_reads.push(self.metadata.new_read_op());
