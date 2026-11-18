@@ -37,7 +37,9 @@ void wboit(vec4 frag_pos, vec4 color, out vec4 accum, out float revealage) {
 	// TODO: maybe average across multiple bins?
     // bin-major so the cdf build reads coalesce across neighbouring pixels
     uint index = (bin_index * size.y + xy.y) * size.x + xy.x;
-    atomicAdd(histogram.data[nonuniformEXT(index)], uint(optical_depth * HISTOGRAM_SCALE));
+    // a cell spans many pixels, so scale by its share to keep the per-pixel average
+    float cell_share = float(size.x * size.y) / float(pc.resolution.x * pc.resolution.y);
+    atomicAdd(histogram.data[nonuniformEXT(index)], uint(optical_depth * cell_share * HISTOGRAM_SCALE + 0.5));
 
     float cdf_value = texture(sampler3D(cdf, cdf_sampler), vec3(normalized_frag_pos, bin_depth)).r;
     float weight = exp(-cdf_value);

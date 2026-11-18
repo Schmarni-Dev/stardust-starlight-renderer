@@ -376,7 +376,7 @@ impl ApplicationHandler for App {
             // not sure if msaa works yet
             SampleCount::Sample1,
             32,
-            HistogramSize::Scaled(Vec2::ONE),
+            HistogramSize::Absoulte(uvec2(32, 32)),
         );
 
         self.window_data = Some(WindowData {
@@ -462,7 +462,7 @@ impl ApplicationHandler for App {
                         // not sure if msaa works yet
                         SampleCount::Sample1,
                         32,
-                        HistogramSize::Scaled(Vec2::ONE),
+                        HistogramSize::Absoulte(uvec2(32, 32)),
                     );
                     window_data.swapchain = swap;
                     window_data.swap_images = images
