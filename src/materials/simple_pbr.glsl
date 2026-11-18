@@ -20,11 +20,9 @@ float remap(float v, float inMin, float inMax, float outMin, float outMax) {
 vec4 calc_color(uint draw_id, vec4 vertex_color, vec2 vertex_uv, vec3 vertex_normal) {
     Metadata metadata = pc.metadata_ptr.data[draw_id];
     Material material = Material(metadata.material);
-    vec4 unlit_color = blend_premul(vertex_color, material.color);
-    if (uint64_t(material.image_ref) != 0) {
-        vec4 image_sample = sample_image(material.image_ref, vertex_uv);
-        unlit_color = blend_premul(unlit_color, image_sample);
-    }
+    vec4 unlit_color = vertex_color * material.color;
+    if (uint64_t(material.image_ref) != 0)
+        unlit_color *= sample_image(material.image_ref, vertex_uv);
     vec3 ref_dir = normalize(vec3(1.0, 1.0, 1.0));
     return vec4(unlit_color.rgb * remap(dot(ref_dir, normalize(vertex_normal)), -1.0, 1.0, 0.4, 1.0), unlit_color.a);
     // float depth = 1 - gl_FragCoord.z;

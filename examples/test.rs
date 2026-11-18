@@ -177,7 +177,7 @@ async fn main() {
         .alloc(
             &ctx,
             PbrData {
-                color: [0.0, 1.0, 0.0, 0.5].into(),
+                color: [0.0, 0.5, 0.0, 0.5].into(),
                 color_image: None,
             },
         )
@@ -187,7 +187,7 @@ async fn main() {
         .alloc(
             &ctx,
             PbrData {
-                color: [1.0, 1.0, 1.0, 0.5].into(),
+                color: [0.5, 0.5, 0.5, 0.5].into(),
                 color_image: Some(image2_ref.clone()),
             },
         )
@@ -197,7 +197,7 @@ async fn main() {
         .alloc(
             &ctx,
             PbrData {
-                color: [1.0, 0.0, 0.0, 0.5].into(),
+                color: [0.5, 0.0, 0.0, 0.5].into(),
                 color_image: None,
             },
         )

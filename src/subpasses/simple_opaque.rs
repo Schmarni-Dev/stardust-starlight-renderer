@@ -154,10 +154,10 @@ impl SimpleOpaque {
                         attachments: vec![
                             ColorBlendAttachmentState {
                                 blend: Some(AttachmentBlend {
-                                    src_color_blend_factor: BlendFactor::SrcColor,
+                                    src_color_blend_factor: BlendFactor::One,
                                     dst_color_blend_factor: BlendFactor::Zero,
                                     color_blend_op: BlendOp::Add,
-                                    src_alpha_blend_factor: BlendFactor::SrcColor,
+                                    src_alpha_blend_factor: BlendFactor::One,
                                     dst_alpha_blend_factor: BlendFactor::Zero,
                                     alpha_blend_op: BlendOp::Add,
                                 }),
