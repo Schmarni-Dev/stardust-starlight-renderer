@@ -236,9 +236,14 @@ impl Context {
             .is_some()
             .then(|| queues.next().unwrap());
         // TODO: return error instead
-        let render_minor = phys_dev.properties().render_minor.unwrap();
+        let render_minor = phys_dev
+            .properties()
+            .render_minor
+            .map(i64::cast_unsigned)
+            .or_else(|| pci_render_minor(&phys_dev))
+            .unwrap();
         // TODO: return error instead here too
-        let drm_render_node = DrmRenderNode::new(render_minor.cast_unsigned()).unwrap();
+        let drm_render_node = DrmRenderNode::new(render_minor).unwrap();
         let gfx_queue = StarlightQueue::new(gfx_queue, drm_render_node.clone());
         gfx_queue
             .set_debug_label(Some("Main Graphics Queue"))
@@ -269,4 +274,15 @@ impl Context {
             transfer_queue,
         }
     }
+}
+
+// renderdoc hides VK_EXT_physical_device_drm but passes VK_EXT_pci_bus_info through
+fn pci_render_minor(dev: &PhysicalDevice) -> Option<u64> {
+    let p = dev.properties();
+    let link = std::fs::read_link(format!(
+        "/dev/dri/by-path/pci-{:04x}:{:02x}:{:02x}.{}-render",
+        p.pci_domain?, p.pci_bus?, p.pci_device?, p.pci_function?
+    ))
+    .ok()?;
+    link.file_name()?.to_str()?.strip_prefix("renderD")?.parse().ok()
 }
