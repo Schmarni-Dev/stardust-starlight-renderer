@@ -193,7 +193,7 @@ impl FullscreenResolve {
                             color_attachment_formats: vec![
                                 Some(opaque_format),
                                 Some(Format::R16G16B16A16_SFLOAT),
-                                Some(Format::R8_UNORM),
+                                Some(Format::R16_SFLOAT),
                                 Some(opaque_format),
                             ],
                             // TODO: properly expose instead of hardcoding

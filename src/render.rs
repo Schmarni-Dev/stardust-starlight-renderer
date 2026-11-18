@@ -177,7 +177,7 @@ impl RenderInstance {
             ctx,
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
-                format: Format::R8_UNORM,
+                format: Format::R16_SFLOAT,
                 extent: [resolution.x, resolution.y, 1],
                 array_layers: resolution.z,
                 samples,

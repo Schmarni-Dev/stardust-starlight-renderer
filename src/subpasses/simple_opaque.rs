@@ -181,7 +181,7 @@ impl SimpleOpaque {
                             color_attachment_formats: vec![
                                 Some(opaque_format),
                                 Some(Format::R16G16B16A16_SFLOAT),
-                                Some(Format::R8_UNORM),
+                                Some(Format::R16_SFLOAT),
                                 Some(opaque_format),
                             ],
                             depth_attachment_format: Some(depth_format),

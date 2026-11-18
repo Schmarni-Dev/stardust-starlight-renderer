@@ -22,13 +22,14 @@ void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(xy, size.xy))) return;
 
-    float total = 0.0;
-    // TODO: figure out if we want to run this backwards
-    for (int bin = 0; bin < size.z; ++bin) {
+    // reverse-z, so higher bins are closer. stored at the bin midpoint so linear
+    // filtering interpolates the optical depth in front within a bin
+    float front = 0.0;
+    for (int bin = size.z - 1; bin >= 0; --bin) {
         uint index = (bin * size.y + xy.y) * size.x + xy.x;
-        // TODO: does this need "nonuniformEXT"?
-        total += float(histogram.data[index]) / HISTOGRAM_SCALE;
-        imageStore(cdf, ivec3(xy, bin), vec4(total, 0.0, 0.0, 0.0));
+        float h = float(histogram.data[index]) / HISTOGRAM_SCALE;
+        imageStore(cdf, ivec3(xy, bin), vec4(front + 0.5 * h, 0.0, 0.0, 0.0));
+        front += h;
     }
     // float v = 0.0;
     // // TODO: figure out if we want to run this backwards

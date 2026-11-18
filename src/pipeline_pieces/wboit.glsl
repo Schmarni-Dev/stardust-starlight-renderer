@@ -39,8 +39,7 @@ void wboit(vec4 frag_pos, vec4 color, out vec4 accum, out float revealage) {
     uint index = (bin_index * size.y + xy.y) * size.x + xy.x;
     atomicAdd(histogram.data[nonuniformEXT(index)], uint(optical_depth * HISTOGRAM_SCALE));
 
-    float cdf_value = texture(sampler3D(cdf, cdf_sampler), vec3(frag_pos.xy, bin_depth)).r;
-    // TODO: make sure this weight is correct
+    float cdf_value = texture(sampler3D(cdf, cdf_sampler), vec3(normalized_frag_pos, bin_depth)).r;
     float weight = exp(-cdf_value);
     accum = color * weight;
     revealage = optical_depth;

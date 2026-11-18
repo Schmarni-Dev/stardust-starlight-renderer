@@ -10,7 +10,7 @@ use vulkano::{
         graphics::{
             GraphicsPipelineCreateInfo,
             color_blend::{
-                AttachmentBlend, ColorBlendAttachmentState, ColorBlendState, ColorBlendStateFlags,
+                AttachmentBlend, BlendOp, ColorBlendAttachmentState, ColorBlendState, ColorBlendStateFlags,
                 ColorComponents,
             },
             depth_stencil::{CompareOp, DepthState, DepthStencilState, DepthStencilStateFlags},
@@ -155,8 +155,12 @@ impl SimpleTransparent {
                         flags: ColorBlendStateFlags::empty(),
                         attachments: vec![
                             ColorBlendAttachmentState::default(),
+                            // vulkano's additive() maxes alpha, the resolve divides by the summed weight
                             ColorBlendAttachmentState {
-                                blend: Some(AttachmentBlend::additive()),
+                                blend: Some(AttachmentBlend {
+                                    alpha_blend_op: BlendOp::Add,
+                                    ..AttachmentBlend::additive()
+                                }),
                                 color_write_mask: ColorComponents::all(),
                                 color_write_enable: true,
                             },
@@ -180,7 +184,7 @@ impl SimpleTransparent {
                             color_attachment_formats: vec![
                                 Some(opaque_format),
                                 Some(Format::R16G16B16A16_SFLOAT),
-                                Some(Format::R8_UNORM),
+                                Some(Format::R16_SFLOAT),
                                 Some(opaque_format),
                             ],
                             depth_attachment_format: Some(depth_format),
