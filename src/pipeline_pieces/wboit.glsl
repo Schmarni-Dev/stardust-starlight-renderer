@@ -3,7 +3,6 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : enable
-#extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_GOOGLE_include_directive : enable
 
@@ -12,10 +11,11 @@
 layout(set = 1, binding = 0) uniform sampler cdf_sampler;
 layout(set = 1, binding = 1) uniform texture3D cdf;
 // TODO: should these be per view?
-layout(scalar, set = 1, binding = 2) writeonly buffer _histogram {
-    // hope this is an f32
-    float data[];
+layout(scalar, set = 1, binding = 2) buffer _histogram {
+    // 16.16 fixed point, RDNA1 has no float atomic add on buffers
+    uint data[];
 } histogram;
+const float HISTOGRAM_SCALE = 65536.0;
 
 float optical_depth(float alpha) {
     return -log(max(1.0 - alpha, 1e-6));
@@ -36,7 +36,7 @@ void wboit(vec4 frag_pos, vec4 color, out vec4 accum, out float revealage) {
     uvec2 xy = min(uvec2(normalized_frag_pos * vec2(size.xy)), uvec2(size.xy) - 1u); 
 	// TODO: maybe average across multiple bins?
     uint index = (xy.x * size.y + xy.y) * size.z + bin_index;
-    atomicAdd(histogram.data[nonuniformEXT(index)], optical_depth);
+    atomicAdd(histogram.data[nonuniformEXT(index)], uint(optical_depth * HISTOGRAM_SCALE));
 
     float cdf_value = texture(sampler3D(cdf, cdf_sampler), vec3(frag_pos.xy, bin_depth)).r;
     // TODO: make sure this weight is correct

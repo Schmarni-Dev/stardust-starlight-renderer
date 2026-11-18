@@ -50,7 +50,7 @@ pub struct RenderContext {
 }
 pub struct WboitContext {
     /// histogram data populated in the wboit accum step
-    pub histogram: Subbuffer<[f32]>,
+    pub histogram: Subbuffer<[u32]>,
     pub cdf_sampler: Arc<Sampler>,
     /// 3D image sampled in the wboit accum step
     /// updated at the end of the render

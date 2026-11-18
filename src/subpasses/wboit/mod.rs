@@ -125,7 +125,7 @@ impl WboitCdfBuildCompute {
                     ..Default::default()
                 })
                 .unwrap()
-                .fill_buffer(ctx.wboit.histogram.reinterpret_ref(), 0f32.to_bits())
+                .fill_buffer(&ctx.wboit.histogram, 0)
                 .unwrap()
                 .pipeline_barrier(&DependencyInfo {
                     dependency_flags: DependencyFlags::BY_REGION,
